@@ -1,0 +1,29 @@
+# Environment & secrets
+.env
+*.env
+*.local
+credentials.json
+
+# Binaries & builds
+bin/
+dist/
+build/
+*.exe
+*.out
+*.app
+
+# Logs
+*.log
+logs/
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Dependencies
+node_modules/
+vendor/
+__pycache__/
+*.pyc
