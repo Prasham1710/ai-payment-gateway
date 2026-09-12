@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+MVN_BIN="/tmp/maven/apache-maven-3.9.6/bin/mvn"
+if [ ! -f "$MVN_BIN" ]; then
+    mkdir -p /tmp/maven
+    curl -s https://archive.apache.org/dist/maven/maven-3/3.9.6/binaries/apache-maven-3.9.6-bin.tar.gz | tar -xz -C /tmp/maven
+fi
+exec "$MVN_BIN" "$@"
