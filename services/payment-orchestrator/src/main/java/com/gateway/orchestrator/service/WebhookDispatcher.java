@@ -8,7 +8,9 @@ import com.gateway.orchestrator.domain.WebhookEndpoint;
 import com.gateway.orchestrator.repository.WebhookDeliveryRepository;
 import com.gateway.orchestrator.repository.WebhookEndpointRepository;
 import com.gateway.orchestrator.security.SecretCipher;
+import com.gateway.orchestrator.security.WebhookUrlGuard;
 import com.gateway.orchestrator.support.Signatures;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.data.domain.PageRequest;
@@ -27,14 +29,20 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Delivers queued webhook events. Each delivery is POSTed with an HMAC-SHA256 signature of the raw
  * body ({@code X-Gateway-Signature}) and retried with exponential backoff until the receiver
  * answers 2xx or the attempts run out.
  *
- * <p>Runs as a single poller per instance; running several instances would need row claiming
- * (e.g. {@code SELECT ... FOR UPDATE SKIP LOCKED}) to avoid duplicate deliveries.
+ * <p>Each poll sends its batch in parallel ({@code gateway.webhooks.concurrency}), so a receiver
+ * that times out only delays its own events. Runs as a single poller per instance; running several
+ * instances would need row claiming (e.g. {@code SELECT ... FOR UPDATE SKIP LOCKED}) to avoid
+ * duplicate deliveries.
  */
 @Component
 @Slf4j
@@ -47,19 +55,33 @@ public class WebhookDispatcher {
     private final WebhookDeliveryRepository deliveryRepository;
     private final WebhookEndpointRepository endpointRepository;
     private final SecretCipher secretCipher;
+    private final WebhookUrlGuard urlGuard;
     private final GatewayProperties.Webhooks settings;
     private final RestTemplate restTemplate;
     private final TransactionTemplate tx;
+    private final ExecutorService senders;
 
     public WebhookDispatcher(WebhookDeliveryRepository deliveryRepository, WebhookEndpointRepository endpointRepository,
-                             SecretCipher secretCipher, GatewayProperties properties, RestTemplateBuilder builder,
-                             PlatformTransactionManager transactionManager) {
+                             SecretCipher secretCipher, WebhookUrlGuard urlGuard, GatewayProperties properties,
+                             RestTemplateBuilder builder, PlatformTransactionManager transactionManager) {
         this.deliveryRepository = deliveryRepository;
         this.endpointRepository = endpointRepository;
         this.secretCipher = secretCipher;
+        this.urlGuard = urlGuard;
         this.settings = properties.getWebhooks();
         this.restTemplate = HttpClients.nonThrowing(builder, settings.getTimeout(), settings.getTimeout());
         this.tx = new TransactionTemplate(transactionManager);
+        AtomicInteger threads = new AtomicInteger();
+        this.senders = Executors.newFixedThreadPool(Math.max(1, settings.getConcurrency()), task -> {
+            Thread thread = new Thread(task, "webhook-sender-" + threads.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        });
+    }
+
+    @PreDestroy
+    void shutdown() {
+        senders.shutdownNow();
     }
 
     private record Job(String url, String secret, String eventId, String event, String payload) {
@@ -69,12 +91,18 @@ public class WebhookDispatcher {
     public void dispatchDue() {
         List<String> due = tx.execute(status -> deliveryRepository.findDueIds(DeliveryStatus.PENDING, Instant.now(),
                 PageRequest.of(0, settings.getBatchSize())));
-        for (String deliveryId : due) {
+        List<Callable<Void>> sends = due.stream().<Callable<Void>>map(deliveryId -> () -> {
             try {
                 deliver(deliveryId);
             } catch (RuntimeException e) {
                 log.error("Webhook delivery {} crashed", deliveryId, e);
             }
+            return null;
+        }).toList();
+        try {
+            senders.invokeAll(sends);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -95,10 +123,16 @@ public class WebhookDispatcher {
         String error = null;
         try {
             // URI, not String: a String URL would be expanded as a URI template.
-            statusCode = restTemplate.exchange(URI.create(job.url()), HttpMethod.POST, new HttpEntity<>(body, headers), String.class)
-                    .getStatusCode().value();
-            if (statusCode < 200 || statusCode >= 300) {
-                error = "Receiver responded with HTTP " + statusCode;
+            URI uri = URI.create(job.url());
+            String blocked = urlGuard.rejectionReason(uri);
+            if (blocked != null) {
+                error = "Not sent: " + blocked;
+            } else {
+                statusCode = restTemplate.exchange(uri, HttpMethod.POST, new HttpEntity<>(body, headers), String.class)
+                        .getStatusCode().value();
+                if (statusCode < 200 || statusCode >= 300) {
+                    error = "Receiver responded with HTTP " + statusCode;
+                }
             }
         } catch (RuntimeException e) {
             // Network errors and anything else still count as a failed attempt, so retries stay bounded.

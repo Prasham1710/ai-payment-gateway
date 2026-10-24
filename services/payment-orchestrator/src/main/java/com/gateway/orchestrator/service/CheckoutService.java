@@ -29,8 +29,6 @@ import java.util.Map;
 @Slf4j
 public class CheckoutService {
 
-    private static final int MAX_IDEMPOTENCY_KEY_LENGTH = 64;
-
     private final MerchantService merchantService;
     private final OrderRepository orderRepository;
     private final PaymentService paymentService;
@@ -52,9 +50,7 @@ public class CheckoutService {
 
     public CheckoutPaymentResponse pay(CheckoutPaymentRequest req, String idempotencyKey) {
         Merchant merchant = merchantService.requireByKeyId(req.getKeyId());
-        if (idempotencyKey != null && (idempotencyKey.isBlank() || idempotencyKey.length() > MAX_IDEMPOTENCY_KEY_LENGTH)) {
-            throw GatewayException.badRequest("Idempotency-Key must be 1 to " + MAX_IDEMPOTENCY_KEY_LENGTH + " characters.", "idempotency_key");
-        }
+        Validators.idempotencyKey(idempotencyKey);
         PaymentInstrument instrument = PaymentInstrument.from(req);
         String email = Validators.email(req.getEmail(), "email", false);
         String contact = Validators.contact(req.getContact());

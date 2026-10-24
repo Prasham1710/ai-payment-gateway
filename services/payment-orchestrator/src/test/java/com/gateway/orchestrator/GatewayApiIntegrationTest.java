@@ -6,22 +6,14 @@ import com.gateway.orchestrator.FakeBankServer.Mode;
 import com.gateway.orchestrator.service.RefundService;
 import com.gateway.orchestrator.service.WebhookDispatcher;
 import com.gateway.orchestrator.support.Signatures;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.test.context.ActiveProfiles;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -29,38 +21,14 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@ActiveProfiles("test")
-class GatewayApiIntegrationTest {
+class GatewayApiIntegrationTest extends IntegrationTestSupport {
 
-    private static final FakeBankServer BANK = startBank();
-
-    @DynamicPropertySource
-    static void bankUrl(DynamicPropertyRegistry registry) {
-        registry.add("simulator.base-url", BANK::baseUrl);
-    }
-
-    @AfterAll
-    static void stopBank() {
-        BANK.close();
-    }
-
-    @Autowired
-    private TestRestTemplate http;
     @Autowired
     private WebhookDispatcher webhookDispatcher;
     @Autowired
     private RefundService refundService;
     @Autowired
     private ObjectMapper objectMapper;
-
-    private record Keys(String accountId, String keyId, String keySecret) {
-    }
-
-    @BeforeEach
-    void resetBank() {
-        BANK.reset();
-    }
 
     @Test
     void signupIssuesApiKeysAndMerchantApisRequireThem() {
@@ -223,8 +191,10 @@ class GatewayApiIntegrationTest {
         String paymentId = paid.getBody().get("payment_id").asText();
         assertThat(as(keys).getForObject("/v1/orders/" + orderId, JsonNode.class).get("status").asText()).isEqualTo("attempted");
 
-        ResponseEntity<JsonNode> refundBeforeCapture = as(keys).postForEntity("/v1/payments/" + paymentId + "/refund", Map.of(), JsonNode.class);
-        assertThat(refundBeforeCapture.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        // Before capture only a full reversal is possible.
+        ResponseEntity<JsonNode> partialBeforeCapture = as(keys).postForEntity("/v1/payments/" + paymentId + "/refund",
+                Map.of("amount", 5000), JsonNode.class);
+        assertThat(partialBeforeCapture.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
 
         ResponseEntity<JsonNode> wrongAmount = as(keys).postForEntity("/v1/payments/" + paymentId + "/capture",
                 Map.of("amount", 10000, "currency", "INR"), JsonNode.class);
@@ -283,13 +253,13 @@ class GatewayApiIntegrationTest {
         Keys keys = signup();
         String paymentId = capturedPayment(keys, 30000);
 
-        BANK.setRefundsDown(true);
+        BANK.setRefundMode(FakeBankServer.RefundMode.DOWN);
         JsonNode refund = as(keys).postForObject("/v1/payments/" + paymentId + "/refund", Map.of("amount", 10000), JsonNode.class);
         assertThat(refund.get("status").asText()).isEqualTo("pending");
         // The amount is reserved while pending, so it cannot be refunded twice.
         assertThat(as(keys).getForObject("/v1/payments/" + paymentId, JsonNode.class).get("amount_refunded").asLong()).isEqualTo(10000);
 
-        BANK.setRefundsDown(false);
+        BANK.setRefundMode(FakeBankServer.RefundMode.PROCESS);
         refundService.attempt(refund.get("id").asText());
         assertThat(as(keys).getForObject("/v1/refunds/" + refund.get("id").asText(), JsonNode.class).get("status").asText())
                 .isEqualTo("processed");
@@ -396,59 +366,5 @@ class GatewayApiIntegrationTest {
         assertThat(badBank.getBody().at("/error/field").asText()).isEqualTo("bank");
         ResponseEntity<JsonNode> nbPaid = pay(keys, nbOrder, Map.of("method", "netbanking", "bank", "HDFC"));
         assertThat(nbPaid.getStatusCode()).isEqualTo(HttpStatus.OK);
-    }
-
-    // --- helpers -------------------------------------------------------------------------------
-
-    private Keys signup() {
-        ResponseEntity<JsonNode> response = http.postForEntity("/v1/merchants",
-                Map.of("name", "Acme Store", "email", "owner-" + UUID.randomUUID() + "@example.com"), JsonNode.class);
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-        JsonNode body = response.getBody();
-        return new Keys(body.get("id").asText(), body.get("key_id").asText(), body.get("key_secret").asText());
-    }
-
-    private TestRestTemplate as(Keys keys) {
-        return http.withBasicAuth(keys.keyId(), keys.keySecret());
-    }
-
-    private JsonNode createOrder(Keys keys, Map<String, Object> body) {
-        ResponseEntity<JsonNode> response = as(keys).postForEntity("/v1/orders", body, JsonNode.class);
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-        return response.getBody();
-    }
-
-    private ResponseEntity<JsonNode> pay(Keys keys, String orderId, Map<String, Object> instrument) {
-        Map<String, Object> body = new HashMap<>(instrument);
-        body.put("key_id", keys.keyId());
-        body.put("order_id", orderId);
-        return http.postForEntity("/v1/checkout/payments", body, JsonNode.class);
-    }
-
-    private String capturedPayment(Keys keys, long amount) {
-        String orderId = createOrder(keys, Map.of("amount", amount)).get("id").asText();
-        ResponseEntity<JsonNode> paid = pay(keys, orderId, Map.of("method", "upi", "vpa", "success@gateway"));
-        assertThat(paid.getStatusCode()).isEqualTo(HttpStatus.OK);
-        return paid.getBody().get("payment_id").asText();
-    }
-
-    private static Map<String, Object> card(String number) {
-        return Map.of("number", number, "name", "Ravi Kumar", "expiry_month", 12, "expiry_year", 2035, "cvv", "123");
-    }
-
-    private static Map<String, String> manyNotes(int count) {
-        Map<String, String> notes = new HashMap<>();
-        for (int i = 0; i < count; i++) {
-            notes.put("key" + i, "value");
-        }
-        return notes;
-    }
-
-    private static FakeBankServer startBank() {
-        try {
-            return new FakeBankServer();
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
     }
 }

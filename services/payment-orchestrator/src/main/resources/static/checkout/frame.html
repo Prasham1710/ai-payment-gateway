@@ -95,6 +95,7 @@
     .icon { width: 56px; height: 56px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 28px; color: #fff; }
     .icon.ok { background: var(--success); }
     .icon.fail { background: var(--danger); }
+    .icon.wait { background: #d97706; }
     .spinner {
       width: 44px; height: 44px; border-radius: 50%; display: inline-block;
       border: 4px solid var(--line); border-top-color: var(--brand); animation: spin .8s linear infinite;
@@ -270,10 +271,10 @@
     return new Intl.NumberFormat("en-IN", { style: "currency", currency: currency || "INR" }).format(paise / 100);
   }
 
-  function showResult(ok, title, detail, id, canRetry) {
+  function showResult(ok, title, detail, id, canRetry, pending) {
     var icon = $("result-icon");
-    icon.className = "icon " + (ok ? "ok" : "fail");
-    icon.textContent = ok ? "✓" : "!";
+    icon.className = "icon " + (pending ? "wait" : (ok ? "ok" : "fail"));
+    icon.textContent = pending ? "…" : (ok ? "✓" : "!");
     $("result-title").textContent = title;
     $("result-detail").textContent = detail || "";
     $("result-id").textContent = id || "";
@@ -389,7 +390,7 @@
       headers: { "Content-Type": "application/json", "Idempotency-Key": newIdempotencyKey() },
       body: JSON.stringify(body)
     })
-      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, status: res.status, data: data }; }); })
       .then(function (result) {
         state.busy = false;
         $("pay").disabled = false;
@@ -403,6 +404,11 @@
           return;
         }
         var error = (result.data && result.data.error) || { description: "Payment failed." };
+        // Another attempt for this order is still with the bank: not a failure, so no payment.failed event.
+        if (result.status === 409) {
+          showResult(false, "Payment in progress", error.description + " Wait a moment before trying again.", "", true, true);
+          return;
+        }
         // Input mistakes are shown on the form; real payment failures get the failure screen and an event.
         if (error.reason === "input_validation_failed") {
           show("view-form");

@@ -1,5 +1,6 @@
 package com.gateway.orchestrator.service;
 
+import com.gateway.orchestrator.config.GatewayProperties;
 import com.gateway.orchestrator.domain.*;
 import com.gateway.orchestrator.dto.AttemptResponse;
 import com.gateway.orchestrator.dto.CaptureRequest;
@@ -32,14 +33,18 @@ import java.util.Optional;
 @Slf4j
 public class PaymentService {
 
-    /** A payment still in {@code created} after this long is treated as abandoned and no longer blocks its order. */
-    private static final Duration IN_FLIGHT_WINDOW = Duration.ofMinutes(2);
+    /**
+     * A payment still in {@code created} after this long is treated as abandoned: it no longer blocks
+     * its order, and {@link PaymentReconciler} settles it. Well above the worst-case routing time.
+     */
+    public static final Duration IN_FLIGHT_WINDOW = Duration.ofMinutes(2);
 
     private final PaymentRepository paymentRepository;
     private final OrderRepository orderRepository;
     private final TransactionRepository transactionRepository;
     private final WebhookService webhookService;
     private final FeeCalculator feeCalculator;
+    private final GatewayProperties properties;
 
     public record PaymentStart(Payment payment, boolean replay) {
     }
@@ -94,7 +99,7 @@ public class PaymentService {
         return new PaymentStart(payment, false);
     }
 
-    /** Applies the routing outcome: {@code authorized} (and captured, if the order auto-captures) or {@code failed}. */
+    /** Applies the routing outcome to a {@code created} payment: {@code authorized} (and maybe captured) or {@code failed}. */
     @Transactional
     public Payment completeAuthorization(String paymentId, RoutingResult result) {
         Payment payment = paymentRepository.findByIdForUpdate(paymentId).orElseThrow();
@@ -103,30 +108,57 @@ public class PaymentService {
         }
         PaymentOrder order = orderRepository.findByIdForUpdate(payment.getOrderId()).orElseThrow();
         payment.setAttempts(result.attempts());
-        payment.setProvider(result.provider());
 
-        if (!result.authorized()) {
-            payment.setStatus(PaymentStatus.FAILED);
-            payment.setErrorCode(result.errorCode());
-            payment.setErrorDescription(result.errorDescription());
-            payment.setErrorSource(result.errorSource());
-            payment.setErrorStep(result.errorStep());
-            payment.setErrorReason(result.errorReason());
-            webhookService.publish(payment.getMerchantId(), WebhookService.PAYMENT_FAILED, entities(payment, null));
-            log.info("Payment {} failed: {}", payment.getId(), result.errorReason());
+        if (result.authorized()) {
+            authorize(payment, order, result.provider(), result.providerTransactionId(), result.bankReference());
             return payment;
         }
-
-        payment.setStatus(PaymentStatus.AUTHORIZED);
-        payment.setProviderTransactionId(result.providerTransactionId());
-        payment.setBankReference(result.bankReference());
-        webhookService.publish(payment.getMerchantId(), WebhookService.PAYMENT_AUTHORIZED, entities(payment, null));
-
-        // Late authorizations on an order another payment already paid stay authorized for the merchant to refund.
-        if (order.isPaymentCapture() && order.getStatus() != OrderStatus.PAID) {
-            capture(payment, order);
+        payment.setProvider(result.provider());
+        payment.setStatus(PaymentStatus.FAILED);
+        payment.setErrorCode(result.errorCode());
+        payment.setErrorDescription(result.errorDescription());
+        payment.setErrorSource(result.errorSource());
+        payment.setErrorStep(result.errorStep());
+        payment.setErrorReason(result.errorReason());
+        if (result.needsReconciliation()) {
+            payment.setReconcileUntil(Instant.now().plus(properties.getReconciliation().getWindow()));
         }
+        webhookService.publish(payment.getMerchantId(), WebhookService.PAYMENT_FAILED, entities(payment, null));
+        log.info("Payment {} failed: {}", payment.getId(), result.errorReason());
         return payment;
+    }
+
+    /**
+     * Late authorization: the bank confirmed, after the fact, a charge we recorded as failed or never
+     * finished. The payment becomes {@code authorized} and follows the normal path from there (auto
+     * capture, or an automatic refund if the order was meanwhile paid by another payment).
+     */
+    @Transactional
+    public boolean authorizeLate(String paymentId, String provider, String providerTransactionId, String bankReference) {
+        Payment payment = paymentRepository.findByIdForUpdate(paymentId).orElseThrow();
+        if (payment.getStatus() != PaymentStatus.CREATED && payment.getStatus() != PaymentStatus.FAILED) {
+            return false;
+        }
+        PaymentOrder order = orderRepository.findByIdForUpdate(payment.getOrderId()).orElseThrow();
+        log.warn("Late authorization of payment {} via {} (was {})", payment.getId(), provider, payment.getStatus());
+        authorize(payment, order, provider, providerTransactionId, bankReference);
+        return true;
+    }
+
+    /** Called by the reconciler when it could not settle a failed payment's outcome this round. */
+    @Transactional
+    public void updateReconciliation(String paymentId, boolean outcomeStillUnknown) {
+        Payment payment = paymentRepository.findByIdForUpdate(paymentId).orElseThrow();
+        if (payment.getStatus() != PaymentStatus.FAILED || payment.getReconcileUntil() == null) {
+            return;
+        }
+        if (!outcomeStillUnknown) {
+            payment.setReconcileUntil(null);
+            log.info("Payment {} confirmed as failed by the bank", payment.getId());
+        } else if (Instant.now().isAfter(payment.getReconcileUntil())) {
+            payment.setReconcileUntil(null);
+            log.error("Payment {}: the bank never confirmed the outcome; manual reconciliation required", payment.getId());
+        }
     }
 
     @Transactional
@@ -151,10 +183,30 @@ public class PaymentService {
         }
         PaymentOrder order = orderRepository.findByIdForUpdate(payment.getOrderId()).orElseThrow();
         if (order.getStatus() == OrderStatus.PAID) {
-            throw GatewayException.badRequest("The order has already been paid by another payment. Refund this payment instead.");
+            throw GatewayException.badRequest("The order has already been paid by another payment. This payment will be refunded automatically.");
         }
         capture(payment, order);
         return EntityMapper.toResponse(payment);
+    }
+
+    private void authorize(Payment payment, PaymentOrder order, String provider, String providerTransactionId, String bankReference) {
+        payment.setStatus(PaymentStatus.AUTHORIZED);
+        payment.setProvider(provider);
+        payment.setProviderTransactionId(providerTransactionId);
+        payment.setBankReference(bankReference);
+        payment.setErrorCode(null);
+        payment.setErrorDescription(null);
+        payment.setErrorSource(null);
+        payment.setErrorStep(null);
+        payment.setErrorReason(null);
+        payment.setReconcileUntil(null);
+        webhookService.publish(payment.getMerchantId(), WebhookService.PAYMENT_AUTHORIZED, entities(payment, null));
+
+        // An authorization on an order that another payment already paid stays authorized; the
+        // refund sweeper (RefundService) then refunds it automatically.
+        if (order.isPaymentCapture() && order.getStatus() != OrderStatus.PAID) {
+            capture(payment, order);
+        }
     }
 
     private void capture(Payment payment, PaymentOrder order) {

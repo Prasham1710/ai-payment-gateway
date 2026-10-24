@@ -13,9 +13,11 @@ A Razorpay-style payment gateway built on a multi-rail **payment orchestrator**.
 | **Hosted checkout (`checkout.js`)** | Drop-in modal with UPI, cards and netbanking. Mobile friendly. Card numbers and CVVs are never stored (only last 4 + network). |
 | **Authorize → capture** | Auto-capture (default) or manual capture via API. Platform fee (2%) and GST (18% of fee) are computed on capture. |
 | **Payment signature** | Checkout returns `HMAC_SHA256(order_id + "\|" + payment_id, key_secret)` so your server can prove the result is genuine. |
-| **Refunds** | Full and partial refunds. The amount is reserved immediately, so concurrent refunds can never exceed what was captured. If the bank rail is down the refund stays `pending` and is retried automatically. |
-| **Webhooks** | `payment.authorized`, `payment.captured`, `payment.failed`, `order.paid`, `refund.created`, `refund.processed`, `refund.failed`. Signed with HMAC-SHA256, written to an outbox in the same DB transaction as the change, retried with exponential backoff. |
-| **Smart routing & failover** | Each payment tries HDFC → ICICI → SBI rails. It fails over only when a rail is down; a bank decline or an unresolved timeout is never retried elsewhere (that would double-charge the customer). Every attempt is recorded. |
+| **Refunds** | Full and partial refunds of captured payments, and full reversal of authorized payments that were never captured. The amount is reserved immediately, so concurrent refunds can never exceed the payment. If the bank rail is down the refund stays `pending` and is retried automatically; a refund the bank never confirmed is never released on a guess. |
+| **Automatic refunds** | Authorized payments that can no longer be captured (the order was paid by another payment, or 5 days passed) are refunded automatically, so a customer's money is never held indefinitely. |
+| **Reconciliation** | If a bank times out or answers with an unclear error, the payment is reported failed but the gateway keeps checking with the bank. A charge the bank later confirms becomes a late authorization (captured, or refunded if the order was already paid). Checkouts interrupted by a crash are settled the same way. |
+| **Webhooks** | `payment.authorized`, `payment.captured`, `payment.failed`, `order.paid`, `refund.created`, `refund.processed`, `refund.failed`. Signed with HMAC-SHA256, written to an outbox in the same DB transaction as the change, delivered in parallel and retried with exponential backoff. URLs on private or internal networks are refused (SSRF protection). |
+| **Smart routing & failover** | Each payment tries HDFC → ICICI → SBI rails. It fails over only when a rail definitely did not process the charge (503, connection refused). A bank decline, timeout or 502/504 is never retried elsewhere, because that could charge the customer twice. Every attempt is recorded. |
 | **Razorpay API conventions** | Amounts in paise, prefixed ids (`order_…`, `pay_…`, `rfnd_…`), snake_case JSON, `{"error": {code, description, source, step, reason, field, metadata}}` errors, `count`/`skip`/`from`/`to` collections, `Idempotency-Key` support. |
 
 ## Architecture
@@ -55,7 +57,12 @@ cd services/payment-orchestrator && mvn spring-boot:run
 
 Open **http://localhost:8080**. The demo store creates a test merchant, opens checkout, verifies the signature, and lets you capture and refund from one page.
 
-Set `GATEWAY_MASTER_KEY` (base64 of 32 random bytes, e.g. `openssl rand -base64 32`) anywhere other than your laptop. The default key in `application.yml` is for local development only.
+Environment variables:
+
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `GATEWAY_MASTER_KEY` | built-in dev key (logs a warning) | Base64 of 32 random bytes (`openssl rand -base64 32`). Encrypts key secrets and webhook secrets. Set it anywhere other than your laptop. |
+| `GATEWAY_WEBHOOKS_ALLOW_PRIVATE_NETWORK` | `false` | Set to `true` to deliver webhooks to a receiver on `localhost` or your LAN while developing. |
 
 ## Integration guide
 
@@ -148,7 +155,7 @@ curl -u key_test_xxx:your_secret -X POST http://localhost:8080/v1/payments/pay_x
   -d '{"amount": 20000, "notes": {"reason": "size exchange"}}'
 ```
 
-Leave out `amount` to refund everything that is left. The `Idempotency-Key` makes retries safe.
+Leave out `amount` to refund everything that is left. The `Idempotency-Key` makes retries safe. A payment that was authorized but never captured can only be refunded in full; this reverses the authorization and no fee is charged.
 
 ### 7. Webhooks
 
@@ -182,6 +189,10 @@ Each delivery is a `POST` with these headers:
 
 Respond with any `2xx` within 5 seconds. Failed deliveries are retried with exponential backoff (5s, 10s, 20s, … up to 8 attempts). `GET /v1/webhooks/{id}/deliveries` shows the delivery log.
 
+Events can arrive out of order (for example `payment.captured` before `payment.authorized`) and an event can arrive more than once. Use `X-Gateway-Event-Id` to ignore duplicates, and use the entity's `status` rather than the arrival order.
+
+Webhook URLs must resolve to public addresses. Loopback, private, link-local and similar addresses are refused, both when the endpoint is registered and before each delivery. To test with a receiver on your own machine, start the orchestrator with `GATEWAY_WEBHOOKS_ALLOW_PRIVATE_NETWORK=true`. Each merchant can register up to 10 endpoints.
+
 ## API reference
 
 Merchant APIs use HTTP Basic auth with `key_id:key_secret`. Checkout APIs are called by `checkout.js` and only take the public `key_id`.
@@ -198,7 +209,7 @@ Merchant APIs use HTTP Basic auth with `key_id:key_secret`. Checkout APIs are ca
 | `GET` | `/v1/payments/{id}` | Fetch a payment |
 | `POST` | `/v1/payments/{id}/capture` | Capture an authorized payment: `amount`, `currency` |
 | `GET` | `/v1/payments/{id}/attempts` | Every bank rail tried while routing the payment |
-| `POST` | `/v1/payments/{id}/refund` | Refund: `amount` (optional), `receipt`, `notes`. Supports `Idempotency-Key`. |
+| `POST` | `/v1/payments/{id}/refund` | Refund: `amount` (optional), `receipt`, `notes`. Captured payments: full or partial. Authorized payments: full reversal only. Supports `Idempotency-Key`. |
 | `GET` | `/v1/payments/{id}/refunds` | Refunds of a payment |
 | `GET` | `/v1/refunds` | List refunds |
 | `GET` | `/v1/refunds/{id}` | Fetch a refund |
@@ -219,13 +230,15 @@ Errors look like Razorpay's:
 ### Lifecycles
 
 ```
-Payment:  created ──► authorized ──► captured ──► refunded   (refunded only once fully refunded;
-             │                                                partial refunds keep it captured
-             └──► failed                                      with refund_status = partial)
+Payment:  created ──► authorized ──► captured ──► refunded
+             │            ▲    └──────────────► refunded   reversal or automatic refund of an uncaptured payment
+             └──► failed ─┘                                late authorization: the bank confirmed after all
 
 Order:    created ──► attempted ──► paid
 Refund:   pending ──► processed | failed
 ```
+
+A partially refunded payment stays `captured` with `refund_status: partial`; it becomes `refunded` once fully refunded.
 
 ## Testing
 
@@ -260,6 +273,7 @@ cd services/bank-simulator && go test -race ./...
 ## Limitations
 
 - Test mode only: INR, a simulated bank, no settlements or payouts yet.
-- The webhook dispatcher and refund retry job assume a single orchestrator instance.
-- Webhook URLs are not restricted. A shared deployment should block private and internal addresses (SSRF).
+- The background jobs (webhook dispatcher, refund retries, automatic refunds, reconciliation) assume a single orchestrator instance.
+- The webhook SSRF check resolves the host before connecting. A DNS answer that changes between the check and the connection (DNS rebinding) is not fully prevented; a production deployment should also send webhooks through an egress proxy.
+- A payment whose outcome the bank never confirms within 24 hours is logged for manual reconciliation.
 - Schema changes are applied with Hibernate `ddl-auto: update`. Production would use versioned migrations (Flyway/Liquibase).

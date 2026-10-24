@@ -55,9 +55,15 @@ On top of the orchestrator sits a **Razorpay-style merchant platform**: merchant
 | Bank rail outcome | Action | Why |
 | :--- | :--- | :--- |
 | Approved | Payment `authorized` (then `captured` if auto-capture) | — |
-| Rail down: HTTP 5xx, kill switch, connection refused | Try the next rail in the chain | The charge was definitely not processed |
-| Declined by issuing bank (HTTP 4xx) | Payment `failed`, no further rails | Retrying elsewhere would charge the customer again |
-| Timeout | Status enquiry on the same rail; if still unknown, payment `failed` | The bank may have debited the customer; reconciliation (Phase 6) resolves it |
+| Rail down: HTTP 503, kill switch, connection refused, request rejected | Try the next rail in the chain | The charge was definitely not processed |
+| Declined by issuing bank (HTTP 4xx with a bank status) | Payment `failed`, no further rails | Retrying elsewhere would charge the customer again |
+| Unknown: timeout, other 5xx (502/504), unreadable answer | Status enquiry on the same rail; if still unknown, payment `failed` (`bank_outcome_unknown`) and handed to the reconciler | The bank may have debited the customer |
+
+### Reconciliation & Automatic Refunds
+
+- **Reconciler** (every 30s): re-checks `failed` payments with an unknown outcome for up to 24h, and settles checkouts that died mid-flight (`created` for more than 2 minutes). A charge the bank confirms becomes a **late authorization** (`failed → authorized`), then is captured as usual.
+- **Automatic refunds** (every 30s): an `authorized` payment that can no longer be captured (its order was paid by another payment, or it is older than the 5-day capture window) is refunded in full.
+- **Refund retries** (every 5s): `pending` refunds are retried; a refund whose outcome is unknown is never released, so the payment can never be refunded twice.
 
 ---
 
@@ -80,9 +86,10 @@ On top of the orchestrator sits a **Razorpay-style merchant platform**: merchant
 - [x] **Hosted checkout:** `checkout.js` + `/checkout/frame.html` (UPI, cards, netbanking), `postMessage` hand-off with origin checks, demo store at `/`.
 - [x] **Payments:** lifecycle `created → authorized → captured → refunded | failed`, auto or manual capture, 2% fee + 18% GST on capture, `GET /v1/payments/{id}/attempts` shows routing.
 - [x] **Payment signature:** `HMAC_SHA256(order_id|payment_id, key_secret)` returned by checkout for server-side verification.
-- [x] **Refunds:** full/partial, amount reserved up front (no over-refund under concurrency), `pending` refunds retried in the background when the rail is down; simulator refunds are idempotent per `refund_id`.
-- [x] **Webhooks:** 7 events, transactional outbox (`webhook_deliveries`), HMAC-SHA256 `X-Gateway-Signature`, exponential backoff, delivery log API.
-- [x] **Smarter failover:** fail over only when a rail is unavailable; declines and unresolved timeouts are final.
+- [x] **Refunds:** full/partial, reversal of uncaptured authorizations, amount reserved up front (no over-refund under concurrency), `pending` refunds retried in the background, unconfirmed refunds never released; simulator refunds are idempotent per `refund_id` (including concurrent retries).
+- [x] **Reconciliation:** late authorizations for charges the bank confirms after a timeout/502, crash recovery for interrupted checkouts, automatic refunds of authorizations that can no longer be captured.
+- [x] **Webhooks:** 7 events, transactional outbox (`webhook_deliveries`), HMAC-SHA256 `X-Gateway-Signature`, parallel delivery with exponential backoff, delivery log API, SSRF protection for webhook URLs.
+- [x] **Smarter failover:** fail over only when a rail definitely did not process the charge; declines and unknown outcomes are never retried on another rail.
 - [x] **Razorpay API conventions:** prefixed ids, snake_case JSON, Razorpay-style error objects, paginated collections, `Idempotency-Key` on checkout and refunds.
 - [x] **Tests:** Spring Boot integration tests (H2 + in-process fake bank) and Go handler tests (`go test -race`).
 
@@ -117,5 +124,5 @@ The Phase 1 endpoints (`/api/v1/payments`, unauthenticated, merchant id in the b
 2. **Phase 3 — Scale & Kafka Outbox:** Asynchronous Kafka event processing, extending the transactional outbox (already used for webhooks) to Kafka, and high-TPS load testing (10,000+ payments/min).
 3. **Phase 4 — AI Smart Routing:** Python FastAPI ML model predicting $P(\text{success} \mid \text{provider, bank, amount, hour})$ + Multi-Armed Bandit ($\epsilon$-greedy).
 4. **Phase 5 — Fraud Detection:** Velocity tracking in Redis + XGBoost anomaly risk scoring model.
-5. **Phase 6 — Reconciliation & Observability:** Automated status mismatch reconciliation worker (including payments that timed out at the bank) + Prometheus metrics & Grafana dashboards.
+5. **Phase 6 — Reconciliation & Observability:** Extend the payment reconciler (already settling unknown bank outcomes) to daily settlement-file reconciliation, plus Prometheus metrics & Grafana dashboards.
 6. **Merchant platform next steps:** Payment Links, settlements & payouts, customers & saved cards, merchant dashboard, live/test mode key pairs.

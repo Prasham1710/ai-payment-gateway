@@ -23,12 +23,19 @@ public record ListParams(int count, int skip, Instant from, Instant to) {
         if (s < 0) {
             throw GatewayException.badRequest("skip must not be negative", "skip");
         }
-        Instant fromTime = from == null ? Instant.EPOCH : Instant.ofEpochSecond(from);
-        Instant toTime = to == null ? MAX_TIME : Instant.ofEpochSecond(to);
+        Instant fromTime = from == null ? Instant.EPOCH : timestamp(from, "from");
+        Instant toTime = to == null ? MAX_TIME : timestamp(to, "to");
         if (fromTime.isAfter(toTime)) {
             throw GatewayException.badRequest("from must be less than or equal to to", "from");
         }
         return new ListParams(c, s, fromTime, toTime);
+    }
+
+    private static Instant timestamp(long epochSeconds, String field) {
+        if (epochSeconds < 0 || epochSeconds > MAX_TIME.getEpochSecond()) {
+            throw GatewayException.badRequest(field + " must be a unix timestamp in seconds.", field);
+        }
+        return Instant.ofEpochSecond(epochSeconds);
     }
 
     /** Newest first, with the id as a tie-breaker so paging is stable for rows created in the same instant. */

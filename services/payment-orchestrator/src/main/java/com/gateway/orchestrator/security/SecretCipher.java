@@ -1,6 +1,7 @@
 package com.gateway.orchestrator.security;
 
 import com.gateway.orchestrator.config.GatewayProperties;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import javax.crypto.Cipher;
@@ -9,6 +10,7 @@ import javax.crypto.spec.SecretKeySpec;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Base64;
 
@@ -18,7 +20,11 @@ import java.util.Base64;
  * Stored format: base64(iv || ciphertext || tag).
  */
 @Component
+@Slf4j
 public class SecretCipher {
+
+    /** Placeholder in application.yml meaning "no key configured": a fixed, publicly known development key is used. */
+    public static final String DEV_KEY_PLACEHOLDER = "insecure-dev-key";
 
     private static final String TRANSFORMATION = "AES/GCM/NoPadding";
     private static final int IV_BYTES = 12;
@@ -32,11 +38,26 @@ public class SecretCipher {
         if (masterKey == null || masterKey.isBlank()) {
             throw new IllegalStateException("gateway.security.master-key must be set to a base64-encoded 32-byte key");
         }
-        byte[] raw = Base64.getDecoder().decode(masterKey.trim());
+        byte[] raw;
+        if (DEV_KEY_PLACEHOLDER.equals(masterKey.trim())) {
+            log.warn("GATEWAY_MASTER_KEY is not set: using the built-in development master key. "
+                    + "Merchant secrets are NOT protected; set GATEWAY_MASTER_KEY (openssl rand -base64 32) outside local development.");
+            raw = sha256(DEV_KEY_PLACEHOLDER);
+        } else {
+            raw = Base64.getDecoder().decode(masterKey.trim());
+        }
         if (raw.length != 32) {
             throw new IllegalStateException("gateway.security.master-key must decode to exactly 32 bytes (AES-256)");
         }
         this.key = new SecretKeySpec(raw, "AES");
+    }
+
+    private static byte[] sha256(String value) {
+        try {
+            return MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     public String encrypt(String plaintext) {

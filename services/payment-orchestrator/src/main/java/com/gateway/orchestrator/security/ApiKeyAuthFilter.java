@@ -40,7 +40,9 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        String path = request.getRequestURI().substring(request.getContextPath().length());
+        // Servlet path + path info is the container-normalized path (no ";params", "..", "//"),
+        // unlike the raw request URI, so the public routes cannot be spoofed.
+        String path = request.getServletPath() + (request.getPathInfo() == null ? "" : request.getPathInfo());
         if (!path.startsWith("/v1/") || path.startsWith("/v1/checkout/")) {
             return true;
         }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
@@ -119,5 +120,47 @@ func TestRefundOfDeclinedChargeFails(t *testing.T) {
 	}
 	if got := decode[RefundResponse](t, rec); got.Status != "FAILED" {
 		t.Fatalf("status %s, want FAILED", got.Status)
+	}
+}
+
+func TestConcurrentRetriesOfOneRefundPayOutOnce(t *testing.T) {
+	s := newTestServer()
+	s.providers["provider-a"].LatencyMs = 50
+	req := RefundRequest{RefundID: "rfnd_c", TransactionID: "tx_unknown", ProviderID: "provider-a", Amount: 10}
+
+	var wg sync.WaitGroup
+	arns := make(chan string, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rec := post(t, s.handleRefund, req)
+			switch rec.Code {
+			case http.StatusOK:
+				var resp RefundResponse
+				if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+					t.Error(err)
+					return
+				}
+				arns <- resp.BankRef
+			case http.StatusServiceUnavailable: // already being processed: the caller retries later
+			default:
+				t.Errorf("unexpected HTTP %d", rec.Code)
+			}
+		}()
+	}
+	wg.Wait()
+	close(arns)
+
+	processed := 0
+	for range arns {
+		processed++
+	}
+	if processed != 1 {
+		t.Fatalf("refund processed %d times concurrently, want exactly 1", processed)
+	}
+	// A later retry replays the recorded result.
+	if rec := post(t, s.handleRefund, req); rec.Code != http.StatusOK {
+		t.Fatalf("replay: HTTP %d, want 200", rec.Code)
 	}
 }

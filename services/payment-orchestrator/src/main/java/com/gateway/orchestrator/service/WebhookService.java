@@ -12,7 +12,9 @@ import com.gateway.orchestrator.dto.WebhookResponse;
 import com.gateway.orchestrator.exception.GatewayException;
 import com.gateway.orchestrator.repository.WebhookDeliveryRepository;
 import com.gateway.orchestrator.repository.WebhookEndpointRepository;
+import com.gateway.orchestrator.config.GatewayProperties;
 import com.gateway.orchestrator.security.SecretCipher;
+import com.gateway.orchestrator.security.WebhookUrlGuard;
 import com.gateway.orchestrator.support.Ids;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -43,22 +45,33 @@ public class WebhookService {
             ORDER_PAID, REFUND_CREATED, REFUND_PROCESSED, REFUND_FAILED);
 
     private static final int MIN_SECRET_LENGTH = 8;
+    private static final int MAX_SECRET_LENGTH = 128;
 
     private final WebhookEndpointRepository endpointRepository;
     private final WebhookDeliveryRepository deliveryRepository;
     private final SecretCipher secretCipher;
+    private final WebhookUrlGuard urlGuard;
+    private final GatewayProperties properties;
     private final ObjectMapper objectMapper;
 
     @Transactional
     public WebhookResponse create(Merchant merchant, WebhookCreateRequest req) {
-        String url = validateUrl(req.getUrl());
-        if (req.getSecret() == null || req.getSecret().length() < MIN_SECRET_LENGTH) {
-            throw GatewayException.badRequest("The secret must be at least " + MIN_SECRET_LENGTH + " characters.", "secret");
+        URI uri = validateUrl(req.getUrl());
+        String blocked = urlGuard.rejectionReason(uri);
+        if (blocked != null) {
+            throw GatewayException.badRequest("The url is not allowed: " + blocked + ".", "url");
+        }
+        if (req.getSecret() == null || req.getSecret().length() < MIN_SECRET_LENGTH || req.getSecret().length() > MAX_SECRET_LENGTH) {
+            throw GatewayException.badRequest("The secret must be " + MIN_SECRET_LENGTH + " to " + MAX_SECRET_LENGTH + " characters.", "secret");
+        }
+        int maxEndpoints = properties.getWebhooks().getMaxEndpointsPerMerchant();
+        if (endpointRepository.countByMerchantId(merchant.getId()) >= maxEndpoints) {
+            throw GatewayException.badRequest("A merchant can have at most " + maxEndpoints + " webhook endpoints.", "url");
         }
         WebhookEndpoint endpoint = endpointRepository.save(WebhookEndpoint.builder()
                 .id(Ids.newId("wh"))
                 .merchantId(merchant.getId())
-                .url(url)
+                .url(uri.toString())
                 .secretEncrypted(secretCipher.encrypt(req.getSecret()))
                 .events(String.join(",", validateEvents(req.getEvents())))
                 .active(true)
@@ -150,7 +163,7 @@ public class WebhookService {
                 .orElseThrow(() -> GatewayException.notFound("The id provided does not exist"));
     }
 
-    private static String validateUrl(String url) {
+    private static URI validateUrl(String url) {
         if (url == null || url.isBlank() || url.length() > 2048) {
             throw GatewayException.badRequest("The url field is required.", "url");
         }
@@ -160,7 +173,7 @@ public class WebhookService {
             if (!(scheme.equals("http") || scheme.equals("https")) || uri.getHost() == null) {
                 throw GatewayException.badRequest("The url must be a valid http(s) URL.", "url");
             }
-            return uri.toString();
+            return uri;
         } catch (URISyntaxException e) {
             throw GatewayException.badRequest("The url must be a valid http(s) URL.", "url");
         }

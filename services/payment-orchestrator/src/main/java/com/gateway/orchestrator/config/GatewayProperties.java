@@ -14,6 +14,8 @@ public class GatewayProperties {
     private Security security = new Security();
     private Routing routing = new Routing();
     private Pricing pricing = new Pricing();
+    private Payments payments = new Payments();
+    private Reconciliation reconciliation = new Reconciliation();
     private Webhooks webhooks = new Webhooks();
     private Refunds refunds = new Refunds();
 
@@ -40,7 +42,29 @@ public class GatewayProperties {
     }
 
     @Data
+    public static class Payments {
+        /** Authorized payments not captured within this window are refunded automatically. */
+        private Duration captureWindow = Duration.ofDays(5);
+        private int batchSize = 50;
+    }
+
+    @Data
+    public static class Reconciliation {
+        /** How long the gateway keeps asking the bank about a payment whose outcome is unknown. */
+        private Duration window = Duration.ofHours(24);
+        private int batchSize = 50;
+    }
+
+    @Data
     public static class Webhooks {
+        /**
+         * Allow webhook URLs that resolve to loopback, private or link-local addresses. Off by default
+         * so merchants cannot make the gateway call internal services (SSRF); enable for local testing.
+         */
+        private boolean allowPrivateNetwork = false;
+        private int maxEndpointsPerMerchant = 10;
+        /** Deliveries sent in parallel, so one slow receiver cannot hold up everyone else's events. */
+        private int concurrency = 8;
         private int maxAttempts = 8;
         private Duration baseBackoff = Duration.ofSeconds(5);
         private Duration maxBackoff = Duration.ofHours(1);
@@ -52,6 +76,8 @@ public class GatewayProperties {
     public static class Refunds {
         private int maxAttempts = 10;
         private Duration retryBackoff = Duration.ofSeconds(30);
+        /** Retry interval once attempts are exhausted but the bank may have processed the refund. */
+        private Duration unconfirmedRetryInterval = Duration.ofHours(1);
         private int batchSize = 50;
     }
 }

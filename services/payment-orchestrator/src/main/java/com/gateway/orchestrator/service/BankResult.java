@@ -9,10 +9,10 @@ public record BankResult(Outcome outcome, BankResponse body, int latencyMs, Stri
         SUCCESS,
         /** The bank processed the request and said no. */
         DECLINED,
-        /** The rail did not process the request (down, 5xx, connection refused). */
+        /** The rail definitely did not process the request (503, connection refused, request rejected). */
         UNAVAILABLE,
-        /** No answer in time; the request may or may not have been processed. */
-        TIMEOUT
+        /** No usable answer; the request may or may not have been processed. */
+        UNKNOWN
     }
 
     public String responseCode() {

@@ -7,6 +7,7 @@ import com.gateway.orchestrator.domain.Transaction;
 import com.gateway.orchestrator.dto.BankChargeRequest;
 import com.gateway.orchestrator.repository.TransactionRepository;
 import com.gateway.orchestrator.support.Ids;
+import com.gateway.orchestrator.support.Text;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -17,9 +18,11 @@ import java.math.BigDecimal;
  * Routes a payment authorization across the provider rails (Provider A -> Provider B -> Provider C).
  *
  * <p>Fails over to the next rail only when the current one definitely did not process the charge
- * (rail killed, 5xx, connection refused). A bank decline ends routing, because the customer's bank
- * said no and retrying elsewhere would just charge them again. A timeout is first resolved with a
- * status enquiry; if the outcome is still unknown, routing stops rather than risk a double charge.
+ * (rail killed / 503, connection refused, request rejected). A bank decline ends routing, because
+ * the customer's bank said no and retrying elsewhere would just charge them again. Any other
+ * failure (timeout, 502/504, unreadable answer) is first checked with a status enquiry; if the
+ * outcome is still unknown, routing stops rather than risk a double charge, and
+ * {@link PaymentReconciler} follows up later.
  */
 @Service
 @RequiredArgsConstructor
@@ -48,9 +51,9 @@ public class PaymentOrchestratorService {
                     .bankCode(payment.getBank())
                     .build());
 
-            if (result.outcome() == BankResult.Outcome.TIMEOUT) {
+            if (result.outcome() == BankResult.Outcome.UNKNOWN) {
                 BankResult enquiry = bankClient.enquire(txId);
-                log.warn("Payment {} timed out on {}; status enquiry says {}", payment.getId(), providerId, enquiry.outcome());
+                log.warn("Payment {} got no usable answer from {}; status enquiry says {}", payment.getId(), providerId, enquiry.outcome());
                 if (enquiry.outcome() == BankResult.Outcome.SUCCESS || enquiry.outcome() == BankResult.Outcome.DECLINED) {
                     result = new BankResult(enquiry.outcome(), enquiry.body(), result.latencyMs(), null);
                 }
@@ -60,14 +63,14 @@ public class PaymentOrchestratorService {
             switch (result.outcome()) {
                 case SUCCESS -> {
                     log.info("Payment {} authorized via {}", payment.getId(), providerId);
-                    return RoutingResult.authorized(providerId, txId, result.bankReference(), attempts);
+                    return RoutingResult.authorized(providerId, txId, Text.truncate(result.bankReference(), 64), attempts);
                 }
                 case DECLINED -> {
                     log.info("Payment {} declined by bank on {}: {}", payment.getId(), providerId, result.message());
                     return RoutingResult.declined(providerId, result.responseCode(), result.message(), attempts);
                 }
-                case TIMEOUT -> {
-                    return RoutingResult.timedOut(providerId, attempts);
+                case UNKNOWN -> {
+                    return RoutingResult.unknownOutcome(providerId, attempts);
                 }
                 case UNAVAILABLE -> log.warn("Provider {} unavailable for payment {}. Failing over.", providerId, payment.getId());
             }
@@ -78,16 +81,15 @@ public class PaymentOrchestratorService {
 
     private void recordAttempt(Payment payment, String txId, String providerId, BankResult result) {
         AttemptStatus status = AttemptStatus.valueOf(result.outcome().name());
-        String message = result.message();
         transactionRepository.save(Transaction.builder()
                 .id(txId)
                 .paymentId(payment.getId())
                 .providerId(providerId)
                 .amount(payment.getAmount())
                 .status(status)
-                .bankReference(status == AttemptStatus.SUCCESS ? result.bankReference() : null)
-                .responseCode(result.responseCode())
-                .message(message != null && message.length() > 255 ? message.substring(0, 255) : message)
+                .bankReference(status == AttemptStatus.SUCCESS ? Text.truncate(result.bankReference(), 64) : null)
+                .responseCode(Text.truncate(result.responseCode(), 10))
+                .message(Text.truncate(result.message(), 255))
                 .latencyMs(result.latencyMs())
                 .build());
     }

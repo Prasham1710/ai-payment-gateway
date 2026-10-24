@@ -16,6 +16,10 @@ gateway:
   scheduling:
     enabled: false
   routing:
-    read-timeout: 2s
+    read-timeout: 600ms
   webhooks:
     base-backoff: 0s
+    # The test webhook receiver runs on 127.0.0.1; the guard itself is unit tested.
+    allow-private-network: true
+  refunds:
+    max-attempts: 2

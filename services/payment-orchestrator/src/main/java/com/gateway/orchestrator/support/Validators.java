@@ -1,5 +1,7 @@
 package com.gateway.orchestrator.support;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gateway.orchestrator.exception.GatewayException;
 
 import java.util.Locale;
@@ -16,6 +18,10 @@ public final class Validators {
     private static final int MAX_RECEIPT_LENGTH = 40;
     private static final int MAX_NOTES = 15;
     private static final int MAX_NOTE_LENGTH = 256;
+    /** Size of the notes column; escaping can make the stored JSON longer than the raw keys and values. */
+    private static final int MAX_NOTES_JSON_LENGTH = 8000;
+    private static final int MAX_IDEMPOTENCY_KEY_LENGTH = 64;
+    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Pattern EMAIL = Pattern.compile("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$");
     private static final Pattern CONTACT = Pattern.compile("^\\+?[0-9]{8,15}$");
 
@@ -65,7 +71,22 @@ public final class Validators {
                 throw GatewayException.badRequest("Notes keys and values may not be greater than " + MAX_NOTE_LENGTH + " characters.", "notes");
             }
         });
+        try {
+            if (MAPPER.writeValueAsString(notes).length() > MAX_NOTES_JSON_LENGTH) {
+                throw GatewayException.badRequest("The notes are too large.", "notes");
+            }
+        } catch (JsonProcessingException e) {
+            throw GatewayException.badRequest("The notes are invalid.", "notes");
+        }
         return notes;
+    }
+
+    /** Optional {@code Idempotency-Key} header: 1-64 characters when present. */
+    public static String idempotencyKey(String key) {
+        if (key != null && (key.isBlank() || key.length() > MAX_IDEMPOTENCY_KEY_LENGTH)) {
+            throw GatewayException.badRequest("Idempotency-Key must be 1 to " + MAX_IDEMPOTENCY_KEY_LENGTH + " characters.", "idempotency_key");
+        }
+        return key;
     }
 
     public static String email(String email, String field, boolean required) {

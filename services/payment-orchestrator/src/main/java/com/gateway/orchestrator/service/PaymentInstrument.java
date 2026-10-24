@@ -22,7 +22,8 @@ public record PaymentInstrument(PaymentMethod method, String vpa, String bank, S
             "UTIB", "Axis Bank",
             "KKBK", "Kotak Mahindra Bank");
 
-    private static final Pattern VPA = Pattern.compile("^[a-zA-Z0-9.\\-_]{2,256}@[a-zA-Z]{2,64}$");
+    /** handle@psp; at most 97 characters, which fits the 100-character column. */
+    private static final Pattern VPA = Pattern.compile("^[a-zA-Z0-9.\\-_]{2,64}@[a-zA-Z]{2,32}$");
 
     public static PaymentInstrument from(CheckoutPaymentRequest req) {
         if (req.getMethod() == null || req.getMethod().isBlank()) {

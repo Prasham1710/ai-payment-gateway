@@ -67,6 +67,8 @@ type SimulatorServer struct {
 	providers    map[string]*ProviderProfile
 	txLedger     map[string]ChargeResponse
 	refundLedger map[string]RefundResponse
+	// Refund ids currently being processed, so a concurrent retry cannot pay the same refund out twice.
+	refundsInFlight map[string]bool
 }
 
 // Sandbox test instruments with a fixed outcome, regardless of the provider's success rate
@@ -85,8 +87,9 @@ func NewSimulatorServer() *SimulatorServer {
 			"provider-b": {ID: "provider-b", Name: "ICICI Payment Rail", SuccessRate: 0.92, LatencyMs: 180, IsKilled: false, Cost: 1.50},
 			"provider-c": {ID: "provider-c", Name: "SBI Gateway Rail", SuccessRate: 0.88, LatencyMs: 250, IsKilled: false, Cost: 1.00},
 		},
-		txLedger:     make(map[string]ChargeResponse),
-		refundLedger: make(map[string]RefundResponse),
+		txLedger:        make(map[string]ChargeResponse),
+		refundLedger:    make(map[string]RefundResponse),
+		refundsInFlight: make(map[string]bool),
 	}
 }
 
@@ -228,22 +231,34 @@ func (s *SimulatorServer) handleRefund(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.RLock()
+	// Check for a replay and claim the refund id in one critical section.
+	s.mu.Lock()
 	previous, replay := s.refundLedger[req.RefundID]
+	inFlight := s.refundsInFlight[req.RefundID]
+	var profile ProviderProfile
+	provider, exists := s.providers[req.ProviderID]
+	if exists {
+		profile = *provider
+	}
+	claimed := !replay && !inFlight && exists && !profile.IsKilled
+	if claimed {
+		s.refundsInFlight[req.RefundID] = true
+	}
 	original, knownCharge := s.txLedger[req.TransactionID]
-	s.mu.RUnlock()
-	if replay {
+	s.mu.Unlock()
+
+	switch {
+	case replay:
 		writeJSON(w, refundHTTPStatus(previous), previous)
 		return
-	}
-
-	profile, exists := s.providerSnapshot(req.ProviderID)
-	if !exists {
+	case inFlight:
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"message": "Refund is already being processed; retry later"})
+		return
+	case !exists:
 		writeJSON(w, http.StatusNotFound, map[string]string{"message": "Unknown provider ID"})
 		return
-	}
-	// A killed rail does not record anything, so the gateway can safely retry the same refund later.
-	if profile.IsKilled {
+	case profile.IsKilled:
+		// A killed rail does not record anything, so the gateway can safely retry the same refund later.
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"message": "Provider rail unavailable (Chaos Kill Switch Active)"})
 		return
 	}
@@ -270,6 +285,7 @@ func (s *SimulatorServer) handleRefund(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	s.refundLedger[req.RefundID] = resp
+	delete(s.refundsInFlight, req.RefundID)
 	s.mu.Unlock()
 	writeJSON(w, refundHTTPStatus(resp), resp)
 }

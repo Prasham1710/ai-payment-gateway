@@ -21,6 +21,11 @@ spring:
     redis:
       host: localhost
       port: 6380
+  task:
+    scheduling:
+      pool:
+        # Webhook dispatcher, refund retries, automatic refunds and reconciliation run independently.
+        size: 4
   jackson:
     # Razorpay-style JSON: snake_case keys, and amounts must be whole paise (50000, not 500.00).
     property-naming-strategy: SNAKE_CASE
@@ -32,9 +37,9 @@ simulator:
 
 gateway:
   security:
-    # AES-256 key that encrypts merchant key secrets and webhook secrets at rest.
-    # The default is for local development only: set GATEWAY_MASTER_KEY anywhere else.
-    master-key: ${GATEWAY_MASTER_KEY:ABXzoRfk/Wu6JLptFXXY0DBJDl30zzsnjMHnGd5DRCs=}
+    # AES-256 key (base64, 32 bytes) that encrypts merchant key secrets and webhook secrets at rest.
+    # Without GATEWAY_MASTER_KEY a publicly known development key is used and a warning is logged.
+    master-key: ${GATEWAY_MASTER_KEY:insecure-dev-key}
   routing:
     providers: provider-a,provider-b,provider-c
     connect-timeout: 2s
@@ -42,7 +47,20 @@ gateway:
   pricing:
     fee-percent: 2.00
     gst-percent: 18.00
+  payments:
+    # Authorized payments that are not captured within this window are refunded automatically.
+    capture-window: 5d
+    auto-refund-poll-interval-ms: 30000
+  reconciliation:
+    # Payments whose bank outcome is unknown are re-checked with the bank for this long.
+    window: 24h
+    poll-interval-ms: 30000
   webhooks:
+    # Webhook URLs on loopback/private/link-local networks are refused (SSRF protection).
+    # Set GATEWAY_WEBHOOKS_ALLOW_PRIVATE_NETWORK=true to deliver to a receiver on your own machine.
+    allow-private-network: ${GATEWAY_WEBHOOKS_ALLOW_PRIVATE_NETWORK:false}
+    max-endpoints-per-merchant: 10
+    concurrency: 8
     poll-interval-ms: 2000
     max-attempts: 8
     base-backoff: 5s
@@ -52,6 +70,7 @@ gateway:
     poll-interval-ms: 5000
     max-attempts: 10
     retry-backoff: 30s
+    unconfirmed-retry-interval: 1h
 
 resilience4j:
   circuitbreaker:

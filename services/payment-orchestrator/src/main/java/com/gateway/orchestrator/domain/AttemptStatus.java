@@ -8,6 +8,9 @@ public enum AttemptStatus {
     DECLINED,
     /** The rail was down or rejected the call before processing it. Safe to fail over. */
     UNAVAILABLE,
-    /** No answer in time: the charge may or may not have gone through, so it is not retried elsewhere. */
-    TIMEOUT
+    /**
+     * No usable answer (timeout, 5xx other than 503, unreadable response): the charge may or may not
+     * have gone through, so it is never retried on another rail. Resolved later by status enquiry.
+     */
+    UNKNOWN
 }

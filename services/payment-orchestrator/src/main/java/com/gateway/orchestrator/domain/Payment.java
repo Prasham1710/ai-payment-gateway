@@ -9,6 +9,8 @@ import java.time.Instant;
 @Table(name = "payments", indexes = {
     @Index(name = "idx_payment_merchant_created", columnList = "merchant_id, created_at"),
     @Index(name = "idx_payment_order", columnList = "order_id"),
+    @Index(name = "idx_payment_status_created", columnList = "status, created_at"),
+    @Index(name = "idx_payment_reconcile", columnList = "reconcile_until"),
     @Index(name = "idx_payment_idempotency", columnList = "merchant_id, idempotency_key", unique = true)
 })
 @Getter
@@ -117,6 +119,13 @@ public class Payment {
 
     @Column(name = "captured_at")
     private Instant capturedAt;
+
+    /**
+     * Set while the bank's answer is unknown (timeout, gateway error): the reconciler keeps asking
+     * the bank until this time, and turns the payment into a late authorization if it went through.
+     */
+    @Column(name = "reconcile_until")
+    private Instant reconcileUntil;
 
     @PrePersist
     protected void onCreate() {

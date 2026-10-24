@@ -22,6 +22,8 @@ public interface RefundRepository extends JpaRepository<Refund, String> {
 
     List<Refund> findByPaymentIdOrderByCreatedAtAsc(String paymentId);
 
+    boolean existsByPaymentId(String paymentId);
+
     List<Refund> findByMerchantIdAndCreatedAtBetween(String merchantId, Instant from, Instant to, Pageable pageable);
 
     @Query("select r.id from Refund r where r.status = :status and r.nextAttemptAt <= :now order by r.nextAttemptAt")
