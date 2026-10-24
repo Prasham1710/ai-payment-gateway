@@ -62,10 +62,11 @@ gateway:
     # Set GATEWAY_WEBHOOKS_ALLOW_PRIVATE_NETWORK=true to deliver to a receiver on your own machine.
     allow-private-network: ${GATEWAY_WEBHOOKS_ALLOW_PRIVATE_NETWORK:false}
     max-endpoints-per-merchant: 10
-    # Deliveries one merchant can have in flight, so a slow receiver cannot take every sender.
-    max-in-flight-per-merchant: 2
-    concurrency: 8
-    poll-interval-ms: 2000
+    # Outstanding deliveries per endpoint and per merchant, so a slow or dead receiver only delays its own events.
+    max-in-flight-per-endpoint: 2
+    max-in-flight-per-merchant: 4
+    concurrency: 16
+    poll-interval-ms: 1000
     max-attempts: 8
     base-backoff: 5s
     max-backoff: 1h

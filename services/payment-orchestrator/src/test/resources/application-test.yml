@@ -18,7 +18,8 @@ gateway:
   routing:
     read-timeout: 600ms
   webhooks:
-    base-backoff: 0s
+    # Long enough that a failed delivery is not retried within an assertion; tests make retries due explicitly.
+    base-backoff: 1s
     timeout: 1s
     # The test webhook receiver runs on 127.0.0.1; the guard itself is unit tested.
     allow-private-network: true

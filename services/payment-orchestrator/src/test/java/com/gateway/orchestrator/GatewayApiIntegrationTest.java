@@ -14,12 +14,14 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 class GatewayApiIntegrationTest extends IntegrationTestSupport {
 
@@ -305,10 +307,15 @@ class GatewayApiIntegrationTest extends IntegrationTestSupport {
         assertThat(failing.at("/items/0/attempts").asInt()).isEqualTo(1);
         assertThat(failing.at("/items/0/last_response_code").asInt()).isEqualTo(500);
 
+        // Retried once the back-off (1s in tests) has passed.
         BANK.setWebhookStatus(200);
-        awaitAll(webhookDispatcher.dispatchDue());
+        await().atMost(Duration.ofSeconds(5)).until(() -> {
+            awaitAll(webhookDispatcher.dispatchDue());
+            JsonNode deliveries = as(keys).getForObject("/v1/webhooks/" + webhookId + "/deliveries?count=2", JsonNode.class);
+            return "delivered".equals(deliveries.at("/items/0/status").asText())
+                    && "delivered".equals(deliveries.at("/items/1/status").asText());
+        });
         JsonNode recovered = as(keys).getForObject("/v1/webhooks/" + webhookId + "/deliveries?count=2", JsonNode.class);
-        assertThat(recovered.at("/items/0/status").asText()).isEqualTo("delivered");
         assertThat(recovered.at("/items/0/attempts").asInt()).isEqualTo(2);
         // Every attempt of the same event carries the same event id, so receivers can de-duplicate.
         assertThat(BANK.webhooks().stream().map(FakeBankServer.ReceivedWebhook::eventId).distinct()).hasSize(2);

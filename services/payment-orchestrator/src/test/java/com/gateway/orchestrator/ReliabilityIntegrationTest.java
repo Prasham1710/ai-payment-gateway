@@ -476,8 +476,8 @@ class ReliabilityIntegrationTest extends IntegrationTestSupport {
         long start = System.nanoTime();
         List<Future<?>> sends = webhookDispatcher.dispatchDue();
         assertThat(Duration.ofNanos(System.nanoTime() - start)).as("the poll does not wait for receivers").isLessThan(Duration.ofMillis(500));
-        assertThat(sends).as("at most 2 in flight per merchant, plus the normal one").hasSize(3);
-        assertThat(webhookDispatcher.dispatchDue()).as("the slow merchant is at its limit").isEmpty();
+        assertThat(sends).as("at most 2 in flight per endpoint, plus the normal one").hasSize(3);
+        assertThat(webhookDispatcher.dispatchDue()).as("the slow endpoint is at its limit").isEmpty();
 
         await().atMost(Duration.ofMillis(800)).until(() -> "delivered".equals(
                 as(normalMerchant).getForObject("/v1/webhooks/" + normalHook + "/deliveries", JsonNode.class).at("/items/0/status").asText()));
@@ -488,6 +488,69 @@ class ReliabilityIntegrationTest extends IntegrationTestSupport {
         // Two were sent and timed out; the third waited for the endpoint to have capacity.
         assertThat(errors).containsExactlyInAnyOrder("1:Receiver did not respond within 1000 ms",
                 "1:Receiver did not respond within 1000 ms", "0:null");
+    }
+
+    @Test
+    void deadEndpointDoesNotStarveTheSameMerchantsHealthyEndpoint() {
+        Keys keys = signup();
+        String dead = as(keys).postForObject("/v1/webhooks", Map.of("url", BANK.baseUrl() + "/hooks/slow",
+                "secret", "whsec_test_123", "events", List.of("payment.captured")), JsonNode.class).get("id").asText();
+        String healthy = as(keys).postForObject("/v1/webhooks", Map.of("url", BANK.baseUrl() + "/hooks",
+                "secret", "whsec_test_123", "events", List.of("payment.captured")), JsonNode.class).get("id").asText();
+        for (int i = 0; i < 3; i++) {
+            capturedPayment(keys, 10000);
+        }
+
+        List<Future<?>> first = webhookDispatcher.dispatchDue();
+        assertThat(first).as("2 for the dead endpoint, 2 for the healthy one").hasSize(4);
+        // The healthy endpoint gets all three through (the third as soon as a slot frees up)
+        // while the dead endpoint's sends are still waiting for their 1s timeout.
+        await().atMost(Duration.ofMillis(800)).until(() -> deliveredCount(keys, healthy) == 3);
+        assertThat(deliveredCount(keys, dead)).isZero();
+        awaitAll(first);
+    }
+
+    @Test
+    void oneMerchantsBacklogDoesNotHideOtherMerchantsDeliveries() {
+        Keys busy = signup();
+        Keys quiet = signup();
+        as(busy).postForObject("/v1/webhooks", Map.of("url", BANK.baseUrl() + "/hooks",
+                "secret", "whsec_test_123", "events", List.of("*")), JsonNode.class);
+        String quietHook = as(quiet).postForObject("/v1/webhooks", Map.of("url", BANK.baseUrl() + "/hooks",
+                "secret", "whsec_test_123", "events", List.of("payment.captured")), JsonNode.class).get("id").asText();
+        for (int i = 0; i < 20; i++) {
+            capturedPayment(busy, 10000);   // 60 older deliveries for one endpoint
+        }
+        capturedPayment(quiet, 10000);
+
+        awaitAll(webhookDispatcher.dispatchDue());
+        assertThat(deliveredCount(quiet, quietHook)).as("delivered in the first poll despite the older backlog").isEqualTo(1);
+    }
+
+    @Test
+    void onePollQueuesMoreDeliveriesThanThereAreSenders() {
+        List<Keys> merchants = new java.util.ArrayList<>();
+        for (int i = 0; i < 9; i++) {
+            Keys keys = signup();
+            as(keys).postForObject("/v1/webhooks", Map.of("url", BANK.baseUrl() + "/hooks",
+                    "secret", "whsec_test_123", "events", List.of("*")), JsonNode.class);
+            capturedPayment(keys, 10000);   // 3 events each
+            merchants.add(keys);
+        }
+
+        List<Future<?>> sends = webhookDispatcher.dispatchDue();
+        assertThat(sends).as("2 per endpoint across 9 endpoints, more than the 16 senders").hasSize(18);
+        // Each finished send immediately frees capacity for that endpoint's next delivery.
+        await().atMost(Duration.ofSeconds(5)).until(() -> BANK.webhooks().size() == 27);
+    }
+
+    private int deliveredCount(Keys keys, String webhookId) {
+        JsonNode deliveries = as(keys).getForObject("/v1/webhooks/" + webhookId + "/deliveries?count=50", JsonNode.class);
+        int delivered = 0;
+        for (JsonNode item : deliveries.get("items")) {
+            delivered += "delivered".equals(item.get("status").asText()) ? 1 : 0;
+        }
+        return delivered;
     }
 
     @Test

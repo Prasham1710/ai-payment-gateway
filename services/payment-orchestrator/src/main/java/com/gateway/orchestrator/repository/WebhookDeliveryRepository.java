@@ -12,17 +12,21 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
-import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
 @Repository
 public interface WebhookDeliveryRepository extends JpaRepository<WebhookDelivery, String> {
-    @Query("select d from WebhookDelivery d where d.status = :status and d.nextAttemptAt <= :now "
-            + "and d.merchantId not in :excludedMerchants and d.id not in :excludedDeliveries order by d.nextAttemptAt")
-    List<WebhookDelivery> findDue(@Param("status") DeliveryStatus status, @Param("now") Instant now,
-                                  @Param("excludedMerchants") Collection<String> excludedMerchants,
-                                  @Param("excludedDeliveries") Collection<String> excludedDeliveries, Pageable pageable);
+    /**
+     * Due pending deliveries, oldest first, but at most {@code perEndpoint} per endpoint, so one
+     * endpoint's backlog cannot fill the batch and hide everyone else's deliveries.
+     */
+    @Query(value = "select id from (select d.id, d.next_attempt_at, row_number() over "
+            + "(partition by d.endpoint_id order by d.next_attempt_at, d.id) as rank_in_endpoint "
+            + "from webhook_deliveries d where d.status = 'PENDING' and d.next_attempt_at <= :now) ranked "
+            + "where rank_in_endpoint <= :perEndpoint order by next_attempt_at, id limit :maxRows", nativeQuery = true)
+    List<String> findDueIdsFairly(@Param("now") Instant now, @Param("perEndpoint") int perEndpoint,
+                                  @Param("maxRows") int maxRows);
 
     List<WebhookDelivery> findByEndpointIdOrderByCreatedAtDesc(String endpointId, Pageable pageable);
 

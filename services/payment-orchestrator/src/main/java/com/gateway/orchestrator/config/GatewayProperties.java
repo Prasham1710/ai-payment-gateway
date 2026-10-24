@@ -65,10 +65,12 @@ public class GatewayProperties {
          */
         private boolean allowPrivateNetwork = false;
         private int maxEndpointsPerMerchant = 10;
-        /** Deliveries one merchant may have queued or in flight, so no merchant can take every sender. */
-        private int maxInFlightPerMerchant = 2;
-        /** Deliveries sent in parallel, so one slow receiver cannot hold up everyone else's events. */
-        private int concurrency = 8;
+        /** Deliveries one endpoint may have queued or in flight, so a dead endpoint only delays itself. */
+        private int maxInFlightPerEndpoint = 2;
+        /** Deliveries one merchant may have queued or in flight across endpoints, so no merchant can take every sender. */
+        private int maxInFlightPerMerchant = 4;
+        /** Deliveries sent in parallel. */
+        private int concurrency = 16;
         private int maxAttempts = 8;
         private Duration baseBackoff = Duration.ofSeconds(5);
         private Duration maxBackoff = Duration.ofHours(1);

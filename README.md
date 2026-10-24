@@ -191,7 +191,7 @@ Respond with any `2xx` within 5 seconds. Failed deliveries are retried with expo
 
 Events can arrive out of order (for example `payment.captured` before `payment.authorized`) and an event can arrive more than once. Use `X-Gateway-Event-Id` to ignore duplicates, and use the entity's `status` rather than the arrival order.
 
-Webhook URLs must resolve to public addresses. Loopback, private, link-local and similar addresses are refused, both when the endpoint is registered and before each delivery. To test with a receiver on your own machine, start the orchestrator with `GATEWAY_WEBHOOKS_ALLOW_PRIVATE_NETWORK=true`. Each merchant can register up to 10 endpoints and has at most 2 deliveries in flight at a time, so a slow receiver only delays its own events.
+Webhook URLs must resolve to public addresses. Loopback, private, link-local and similar addresses are refused, both when the endpoint is registered and before each delivery. To test with a receiver on your own machine, start the orchestrator with `GATEWAY_WEBHOOKS_ALLOW_PRIVATE_NETWORK=true`. Each merchant can register up to 10 endpoints. At most 2 deliveries per endpoint and 4 per merchant are in flight at a time, so a slow or dead receiver only delays its own events.
 
 ## API reference
 
@@ -274,6 +274,7 @@ cd services/bank-simulator && go test -race ./...
 
 - Test mode only: INR, a simulated bank, no settlements or payouts yet.
 - The background jobs (webhook dispatcher, refund retries, automatic refunds, reconciliation) assume a single orchestrator instance.
+- Merchant signup is open and nothing is rate limited. A shared deployment needs signup verification and rate limits at the edge; otherwise many accounts could, for example, tie up webhook senders with slow receivers or slow DNS.
 - The webhook SSRF check resolves the host before connecting. A DNS answer that changes between the check and the connection (DNS rebinding) is not fully prevented; a production deployment should also send webhooks through an egress proxy.
 - A payment whose outcome the bank never confirms within 24 hours is logged for manual reconciliation.
 - Schema changes are applied with Hibernate `ddl-auto: update`. Production would use versioned migrations (Flyway/Liquibase).

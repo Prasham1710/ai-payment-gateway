@@ -7,38 +7,22 @@ import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.UnknownHostException;
-import java.time.Duration;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Stops merchants from pointing webhooks at the gateway's own network (SSRF): loopback, private,
  * link-local (cloud metadata), carrier-grade NAT and other non-public addresses are refused unless
  * {@code gateway.webhooks.allow-private-network} is on. Checked when an endpoint is registered and
- * again before every delivery, since DNS answers can change. DNS lookups run on a small pool with
- * a deadline, so a slow nameserver cannot hold a request or sender thread.
+ * again before every delivery, since DNS answers can change. Lookups run on the caller's own thread
+ * (never a shared pool one tenant could fill); the dispatcher's per-merchant cap bounds how many
+ * sender threads a merchant with slow DNS can occupy.
  */
 @Component
 public class WebhookUrlGuard {
 
     private final boolean allowPrivateNetwork;
-    private final Duration lookupTimeout;
-    private final ExecutorService resolver;
 
     public WebhookUrlGuard(GatewayProperties properties) {
         this.allowPrivateNetwork = properties.getWebhooks().isAllowPrivateNetwork();
-        this.lookupTimeout = properties.getWebhooks().getTimeout();
-        AtomicInteger threads = new AtomicInteger();
-        this.resolver = Executors.newFixedThreadPool(4, task -> {
-            Thread thread = new Thread(task, "webhook-dns-" + threads.incrementAndGet());
-            thread.setDaemon(true);
-            return thread;
-        });
     }
 
     /** Returns why the URL may not be called, or {@code null} if it may. */
@@ -51,25 +35,9 @@ public class WebhookUrlGuard {
             return "the URL has no host";
         }
         InetAddress[] addresses;
-        CompletableFuture<InetAddress[]> lookup = CompletableFuture.supplyAsync(() -> {
-            try {
-                return InetAddress.getAllByName(host);
-            } catch (UnknownHostException e) {
-                return null;
-            }
-        }, resolver);
         try {
-            addresses = lookup.get(lookupTimeout.toMillis(), TimeUnit.MILLISECONDS);
-        } catch (TimeoutException e) {
-            lookup.cancel(true);
-            return "the host " + host + " could not be resolved in time";
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return "the host " + host + " could not be resolved";
-        } catch (ExecutionException e) {
-            return "the host " + host + " could not be resolved";
-        }
-        if (addresses == null) {
+            addresses = InetAddress.getAllByName(host);
+        } catch (UnknownHostException e) {
             return "the host " + host + " could not be resolved";
         }
         for (InetAddress address : addresses) {

@@ -13,7 +13,10 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
+import com.gateway.orchestrator.service.WebhookDispatcher;
+
 import java.io.IOException;
+import java.time.Duration;
 import java.io.UncheckedIOException;
 import java.util.HashMap;
 import java.util.List;
@@ -49,11 +52,15 @@ abstract class IntegrationTestSupport {
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
+    @Autowired
+    private WebhookDispatcher dispatcher;
 
     @BeforeEach
-    void resetBank() {
+    void resetBank() throws InterruptedException {
         BANK.reset();
-        // Every test starts with an empty webhook outbox, so deliveries queued by earlier tests are not sent.
+        // Every test starts with an idle dispatcher and an empty webhook outbox, so sends left over
+        // from earlier tests cannot claim this test's deliveries.
+        assertThat(dispatcher.awaitIdle(Duration.ofSeconds(10))).isTrue();
         jdbcTemplate.update("update webhook_deliveries set status = 'FAILED' where status = 'PENDING'");
     }
 
