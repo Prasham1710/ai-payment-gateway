@@ -48,6 +48,18 @@ public class WebhookService {
 
     private static final int MIN_SECRET_LENGTH = 8;
     private static final int MAX_SECRET_LENGTH = 128;
+    /**
+     * Serializes endpoint creation per merchant within this instance. The merchant row lock does the
+     * same across instances on PostgreSQL; this also covers databases whose locking reads can miss a
+     * row committed while they waited (H2, used in tests).
+     */
+    private static final Object[] CREATE_LOCKS = new Object[64];
+
+    static {
+        for (int i = 0; i < CREATE_LOCKS.length; i++) {
+            CREATE_LOCKS[i] = new Object();
+        }
+    }
 
     private final WebhookEndpointRepository endpointRepository;
     private final MerchantRepository merchantRepository;
@@ -76,7 +88,9 @@ public class WebhookService {
         if (blocked != null) {
             throw GatewayException.badRequest("The url is not allowed: " + blocked + ".", "url");
         }
-        WebhookEndpoint endpoint = tx.execute(status -> {
+        WebhookEndpoint endpoint;
+        synchronized (CREATE_LOCKS[Math.floorMod(merchant.getId().hashCode(), CREATE_LOCKS.length)]) {
+            endpoint = tx.execute(status -> {
             // Re-check the cap under the merchant's row lock: the check above ran before a possibly slow DNS lookup.
             merchantRepository.findByIdForUpdate(merchant.getId()).orElseThrow();
             if (endpointRepository.countByMerchantId(merchant.getId()) >= maxEndpoints) {
@@ -90,7 +104,8 @@ public class WebhookService {
                 .events(events)
                 .active(true)
                 .build());
-        });
+            });
+        }
         return EntityMapper.toResponse(endpoint);
     }
 

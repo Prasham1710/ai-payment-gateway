@@ -37,6 +37,7 @@ abstract class IntegrationTestSupport {
     @DynamicPropertySource
     static void bankUrl(DynamicPropertyRegistry registry) {
         registry.add("simulator.base-url", BANK::baseUrl);
+        registry.add("gateway.routing.ai.base-url", BANK::baseUrl);
     }
 
     @AfterAll

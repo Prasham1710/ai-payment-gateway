@@ -53,6 +53,10 @@ public class FakeBankServer implements AutoCloseable {
     private volatile RefundMode refundMode = RefundMode.PROCESS;
     private volatile int webhookStatus = 200;
     private AtomicInteger failingWebhookCalls;
+    /** AI router stand-in: the order to suggest (null means "router unavailable") and how long to take. */
+    private volatile List<String> aiOrder;
+    private volatile long aiDelayMillis;
+    private final List<JsonNode> aiFeedback = new CopyOnWriteArrayList<>();
 
     public FakeBankServer() throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -63,6 +67,8 @@ public class FakeBankServer implements AutoCloseable {
         server.createContext("/hooks", this::webhook);
         server.createContext("/hooks/slow", this::slowWebhook);
         server.createContext("/hooks/fail", this::failingWebhook);
+        server.createContext("/v1/route", this::aiRoute);
+        server.createContext("/v1/feedback", this::aiFeedback);
         failingWebhookCalls = new AtomicInteger();
         server.start();
     }
@@ -72,6 +78,9 @@ public class FakeBankServer implements AutoCloseable {
     }
 
     public void reset() {
+        aiOrder = null;
+        aiDelayMillis = 0;
+        aiFeedback.clear();
         modes.clear();
         chargeCalls.clear();
         webhooks.clear();
@@ -199,6 +208,32 @@ public class FakeBankServer implements AutoCloseable {
                 exchange.getRequestHeaders().getFirst("X-Gateway-Event")));
         exchange.sendResponseHeaders(webhookStatus, -1);
         exchange.close();
+    }
+
+    public void setAiRouter(List<String> order, long delayMillis) {
+        this.aiOrder = order;
+        this.aiDelayMillis = delayMillis;
+    }
+
+    public List<JsonNode> aiFeedback() {
+        return aiFeedback;
+    }
+
+    private void aiRoute(HttpExchange exchange) throws IOException {
+        exchange.getRequestBody().readAllBytes();
+        List<String> order = aiOrder;
+        sleep(aiDelayMillis);
+        if (order == null) {
+            exchange.sendResponseHeaders(503, -1);
+            exchange.close();
+            return;
+        }
+        respond(exchange, 200, Map.of("providers", order, "strategy", "test"));
+    }
+
+    private void aiFeedback(HttpExchange exchange) throws IOException {
+        aiFeedback.add(MAPPER.readTree(exchange.getRequestBody()));
+        respond(exchange, 200, Map.of("ok", true));
     }
 
     public int failingWebhookCalls() {

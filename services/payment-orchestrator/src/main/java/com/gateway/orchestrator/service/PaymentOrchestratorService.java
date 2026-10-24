@@ -1,6 +1,5 @@
 package com.gateway.orchestrator.service;
 
-import com.gateway.orchestrator.config.GatewayProperties;
 import com.gateway.orchestrator.domain.AttemptStatus;
 import com.gateway.orchestrator.domain.Payment;
 import com.gateway.orchestrator.domain.Transaction;
@@ -15,7 +14,8 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 
 /**
- * Routes a payment authorization across the provider rails (Provider A -> Provider B -> Provider C).
+ * Routes a payment authorization across the provider rails, in the order suggested by the AI router
+ * ({@link RoutingAdvisor}), or the configured order (Provider A -> Provider B -> Provider C) without it.
  *
  * <p>Fails over to the next rail only when the current one definitely did not process the charge
  * (rail killed / 503, connection refused, request rejected). A bank decline ends routing, because
@@ -31,11 +31,13 @@ public class PaymentOrchestratorService {
 
     private final BankSimulatorClient bankClient;
     private final TransactionRepository transactionRepository;
-    private final GatewayProperties properties;
+    private final RoutingAdvisor routingAdvisor;
 
     public RoutingResult authorize(Payment payment) {
+        RoutingAdvisor.Plan plan = routingAdvisor.plan(payment);
+        log.info("Routing payment {} ({}) in order {} [{}]", payment.getId(), payment.getMethod(), plan.providers(), plan.strategy());
         int attempts = 0;
-        for (String providerId : properties.getRouting().getProviders()) {
+        for (String providerId : plan.providers()) {
             attempts++;
             // Write-ahead: the attempt is committed as UNKNOWN before the charge is sent, so a crash or a
             // failed write while the bank is processing it still leaves a transaction id to reconcile.
@@ -67,7 +69,8 @@ public class PaymentOrchestratorService {
                     result = new BankResult(enquiry.outcome(), enquiry.body(), result.latencyMs(), null);
                 }
             }
-            recordOutcome(attempt, result);
+            AttemptStatus attemptStatus = recordOutcome(attempt, result);
+            routingAdvisor.feedback(providerId, payment, attemptStatus, result.latencyMs());
 
             switch (result.outcome()) {
                 case SUCCESS -> {
@@ -88,7 +91,7 @@ public class PaymentOrchestratorService {
         return RoutingResult.allRailsUnavailable(attempts);
     }
 
-    private void recordOutcome(Transaction attempt, BankResult result) {
+    private AttemptStatus recordOutcome(Transaction attempt, BankResult result) {
         AttemptStatus status = result.outcome() == BankResult.Outcome.NOT_FOUND
                 ? AttemptStatus.UNKNOWN : AttemptStatus.valueOf(result.outcome().name());
         attempt.setStatus(status);
@@ -97,5 +100,6 @@ public class PaymentOrchestratorService {
         attempt.setMessage(Text.truncate(result.message(), 255));
         attempt.setLatencyMs(result.latencyMs());
         transactionRepository.save(attempt);
+        return status;
     }
 }

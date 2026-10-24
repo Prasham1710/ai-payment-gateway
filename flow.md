@@ -114,7 +114,7 @@ The Phase 1 endpoints (`/api/v1/payments`, unauthenticated, merchant id in the b
 ## 4. Upcoming Project Phases & Roadmap
 
 ```text
-  Phase 1 + 1.5 (DONE)      Phase 2                  Phase 3                  Phase 4                  Phase 5                  Phase 6
+  Phase 1 + 1.5 (DONE)      Phase 2                  Phase 3                  Phase 4 (DONE)           Phase 5                  Phase 6
 ┌────────────────┐     ┌────────────────┐     ┌────────────────┐     ┌────────────────┐     ┌────────────────┐     ┌────────────────┐
 │ Core Engine &  │ ──> │ Idempotency &  │ ──> │ Kafka Scaling  │ ──> │ AI/ML Smart    │ ──> │ Real-Time      │ ──> │ Reconciliation │
 │ Go Simulator   │     │ CircuitBreaker │     │ & Outbox       │     │ Routing Engine │     │ Fraud Detector │     │ & Observability│
@@ -123,7 +123,7 @@ The Phase 1 endpoints (`/api/v1/payments`, unauthenticated, merchant id in the b
 
 1. **Phase 2 — Distributed Reliability:** Redis distributed locking (`SETNX`), Resilience4j provider circuit breakers, and timeout management.
 2. **Phase 3 — Scale & Kafka Outbox:** Asynchronous Kafka event processing, extending the transactional outbox (already used for webhooks) to Kafka, and high-TPS load testing (10,000+ payments/min).
-3. **Phase 4 — AI Smart Routing:** Python FastAPI ML model predicting $P(\text{success} \mid \text{provider, bank, amount, hour})$ + Multi-Armed Bandit ($\epsilon$-greedy).
+3. **Phase 4 — AI Smart Routing (done):** `services/ai-router`, a Python FastAPI service. Discounted Thompson sampling over (provider, payment method) success rates with time-based forgetting, blended with a scikit-learn logistic regression predicting $P(\text{success} \mid \text{provider, method, amount, hour})$. The orchestrator asks it for the rail order with a 150 ms deadline, falls back to the static order, and feeds every attempt's outcome back. See the README's "AI smart routing" section.
 4. **Phase 5 — Fraud Detection:** Velocity tracking in Redis + XGBoost anomaly risk scoring model.
 5. **Phase 6 — Reconciliation & Observability:** Extend the payment reconciler (already settling unknown bank outcomes) to daily settlement-file reconciliation, plus Prometheus metrics & Grafana dashboards.
 6. **Merchant platform next steps:** Payment Links, settlements & payouts, customers & saved cards, merchant dashboard, live/test mode key pairs.

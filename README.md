@@ -17,7 +17,8 @@ A Razorpay-style payment gateway built on a multi-rail **payment orchestrator**.
 | **Automatic refunds** | Authorized payments that can no longer be captured (the order was paid by another payment, or 5 days passed) are refunded automatically, so a customer's money is never held indefinitely. |
 | **Reconciliation** | If a bank times out or answers with an unclear error, the payment is reported failed but the gateway keeps checking with the bank. A charge the bank later confirms becomes a late authorization (captured, or refunded if the order was already paid). Checkouts interrupted by a crash are settled the same way. |
 | **Webhooks** | `payment.authorized`, `payment.captured`, `payment.failed`, `order.paid`, `refund.created`, `refund.processed`, `refund.failed`. Signed with HMAC-SHA256, written to an outbox in the same DB transaction as the change, delivered in parallel and retried with exponential backoff. URLs on private or internal networks are refused (SSRF protection). |
-| **Smart routing & failover** | Each payment tries HDFC → ICICI → SBI rails. It fails over only when a rail definitely did not process the charge (503, connection refused). A bank decline, timeout or 502/504 is never retried elsewhere, because that could charge the customer twice. Every attempt is recorded. |
+| **AI smart routing** | An AI router picks the order in which rails are tried for each payment, from live success rates (a multi-armed bandit) blended with a model trained on past attempts. Traffic moves away from a degrading rail within a few dozen payments and comes back when it recovers. If the router is down or slower than 150 ms, the gateway uses the configured order. |
+| **Failover** | Each payment tries the rails in order (provider-a → provider-b → provider-c without the AI router). It fails over only when a rail definitely did not process the charge (503, connection refused). A bank decline, timeout or 502/504 is never retried elsewhere, because that could charge the customer twice. Every attempt is recorded. |
 | **Razorpay API conventions** | Amounts in paise, prefixed ids (`order_…`, `pay_…`, `rfnd_…`), snake_case JSON, `{"error": {code, description, source, step, reason, field, metadata}}` errors, `count`/`skip`/`from`/`to` collections, `Idempotency-Key` support. |
 
 ## Architecture
@@ -25,7 +26,8 @@ A Razorpay-style payment gateway built on a multi-rail **payment orchestrator**.
 ```
  Merchant server ──(Basic auth: key_id:key_secret)──► Payment Orchestrator (Spring Boot, :8080) ──► PostgreSQL
  Customer browser ─(checkout.js, key_id only)───────►   ├─ orders / payments / refunds / webhooks
-                                                        ├─ smart routing + failover ──► Go Bank Simulator (:8081)
+                                                        ├─ "which rail first?" ───────► AI Router (Python, :8000)
+                                                        ├─ routing + failover ────────► Go Bank Simulator (:8081)
                                                         └─ webhook dispatcher ────────► merchant webhook URL
 ```
 
@@ -33,6 +35,7 @@ A Razorpay-style payment gateway built on a multi-rail **payment orchestrator**.
 | :--- | :--- | :--- |
 | Payment orchestrator + hosted checkout | Java 17, Spring Boot 3.2 | 8080 |
 | Bank & provider simulator (3 rails, chaos controls) | Go | 8081 |
+| AI router (bandit + success model) | Python 3.12, FastAPI, scikit-learn | 8000 |
 | Database | PostgreSQL 16 | 5432 |
 | Cache (reserved for Phase 2 locks/velocity) | Redis 7 | 6380 |
 
@@ -40,7 +43,7 @@ See [`flow.md`](flow.md) for the full payment flow and roadmap.
 
 ## Quick start
 
-Prerequisites: Docker, Go 1.20+, Java 17+ and Maven 3.9+.
+Prerequisites: Docker, Go 1.20+, Java 17+, Maven 3.9+ and Python 3.11+.
 
 ```bash
 # 1. PostgreSQL + Redis
@@ -51,7 +54,11 @@ docker compose -f docker/docker-compose.yml up -d
 # 2. Bank simulator
 cd services/bank-simulator && go run .
 
-# 3. Orchestrator (new terminal)
+# 3. AI router (new terminal; optional, payments use the static rail order without it)
+cd services/ai-router && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/uvicorn app.main:app --port 8000
+
+# 4. Orchestrator (new terminal)
 cd services/payment-orchestrator && mvn spring-boot:run
 ```
 
@@ -63,6 +70,10 @@ Environment variables:
 | :--- | :--- | :--- |
 | `GATEWAY_MASTER_KEY` | built-in dev key (logs a warning) | Base64 of 32 random bytes (`openssl rand -base64 32`). Encrypts key secrets and webhook secrets. Set it anywhere other than your laptop. |
 | `GATEWAY_WEBHOOKS_ALLOW_PRIVATE_NETWORK` | `false` | Set to `true` to deliver webhooks to a receiver on `localhost` or your LAN while developing. |
+| `GATEWAY_AI_ROUTING_ENABLED` | `true` | Set to `false` to always use the configured rail order. |
+| `GATEWAY_AI_ROUTER_URL` | `http://localhost:8000` | Where the AI router runs. |
+
+The AI router reads `AI_ROUTER_MODEL_PATH` (default `models/routing-model.joblib`), `AI_ROUTER_MODEL_WEIGHT` (`0.3`), `AI_ROUTER_DISCOUNT` (`0.98`), `AI_ROUTER_HALF_LIFE_SECONDS` (`120`) and `AI_ROUTER_TIMEZONE` (`Asia/Kolkata`); see [AI smart routing](#ai-smart-routing).
 
 ## Integration guide
 
@@ -240,6 +251,40 @@ Refund:   pending ──► processed | failed
 
 A partially refunded payment stays `captured` with `refund_status: partial`; it becomes `refunded` once fully refunded.
 
+## AI smart routing
+
+For every payment the orchestrator asks the AI router (`POST /v1/route`) in which order to try the rails, then reports each attempt's outcome back (`POST /v1/feedback`). The router never adds or drops rails: the gateway keeps only the rails it has configured and appends any the router left out. If the router fails or takes longer than 150 ms, the configured order is used, so the router can never block or break a payment.
+
+How the order is chosen:
+
+- **Live success rates (multi-armed bandit).** Each (rail, payment method) pair keeps a Beta belief about its success rate, updated by every attempt. Ranking samples from these beliefs (Thompson sampling), so the best rail gets most traffic while the others still get enough to notice changes. Old results count for less: each new result discounts the history (`AI_ROUTER_DISCOUNT`), and evidence halves every `AI_ROUTER_HALF_LIFE_SECONDS`. A rail that lost its traffic after a bad spell therefore drifts back to "unknown", is tried again, and wins its traffic back once it has recovered.
+- **Trained model (optional).** A logistic regression predicts P(success | rail, method, amount, hour of day) from past attempts. When a model is loaded its prediction is blended in at `AI_ROUTER_MODEL_WEIGHT`; without one the router uses the bandit alone. The strategy used is logged by the orchestrator and returned by the router (`thompson_sampling` or `thompson_sampling+model`).
+
+Train a model:
+
+```bash
+cd services/ai-router
+# from the gateway's own attempts (export query in train.py), or synthesize data from the simulator:
+.venv/bin/python generate_data.py --count 3000 --out data/attempts.csv
+.venv/bin/python train.py data/attempts.csv --out models/routing-model.joblib   # prints accuracy and AUC
+curl -X POST localhost:8000/v1/model/reload
+```
+
+Watch it work: with everything running, the demo sends payments through the real checkout API while it degrades provider-a to 20% success and then restores it.
+
+```bash
+AI_ROUTER_HALF_LIFE_SECONDS=15 .venv/bin/uvicorn app.main:app --port 8000   # short memory keeps the demo quick
+.venv/bin/python demo.py --payments 60 --fade-wait 45
+```
+
+```
+1. all rails healthy                   first rail tried -> provider-a: 66%, provider-b: 26%, provider-c: 6%
+2. provider-a degraded to 20% success  first rail tried -> provider-a: 21%, provider-b: 73%, provider-c: 5%
+3. provider-a recovered                first rail tried -> provider-a: 73%, provider-b: 25%, provider-c: 1%
+```
+
+`GET localhost:8000/v1/stats` shows the router's current beliefs per rail and the loaded model's metrics.
+
 ## Testing
 
 ### Test instruments
@@ -268,6 +313,7 @@ Then `GET /v1/payments/{id}/attempts` shows which rails were tried.
 ```bash
 cd services/payment-orchestrator && mvn test   # API integration tests (H2 + in-process fake bank)
 cd services/bank-simulator && go test -race ./...
+cd services/ai-router && .venv/bin/python -m pytest
 ```
 
 ## Limitations
@@ -277,4 +323,5 @@ cd services/bank-simulator && go test -race ./...
 - Merchant signup is open and nothing is rate limited. A shared deployment needs signup verification and rate limits at the edge; otherwise many accounts could, for example, tie up webhook senders with slow receivers or slow DNS.
 - The webhook SSRF check resolves the host before connecting. A DNS answer that changes between the check and the connection (DNS rebinding) is not fully prevented; a production deployment should also send webhooks through an egress proxy.
 - A payment whose outcome the bank never confirms within 24 hours is logged for manual reconciliation.
+- The AI router keeps its live success rates in memory, per router instance; they start from scratch when it restarts (the trained model is loaded from disk). Several router instances would each learn separately.
 - Schema changes are applied with Hibernate `ddl-auto: update`. Production would use versioned migrations (Flyway/Liquibase).

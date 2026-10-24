@@ -31,6 +31,16 @@ public class GatewayProperties {
         private List<String> providers = List.of("provider-a", "provider-b", "provider-c");
         private Duration connectTimeout = Duration.ofSeconds(2);
         private Duration readTimeout = Duration.ofSeconds(8);
+        private Ai ai = new Ai();
+    }
+
+    @Data
+    public static class Ai {
+        /** Ask the AI router (services/ai-router) for the rail order; falls back to {@code providers} order. */
+        private boolean enabled = true;
+        private String baseUrl = "http://localhost:8000";
+        /** Hard deadline for routing advice; past it the configured order is used. */
+        private Duration timeout = Duration.ofMillis(150);
     }
 
     @Data

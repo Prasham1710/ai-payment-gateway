@@ -44,6 +44,11 @@ gateway:
     providers: provider-a,provider-b,provider-c
     connect-timeout: 2s
     read-timeout: 8s
+    ai:
+      # AI smart routing (services/ai-router). If it is down or slow, the order above is used.
+      enabled: ${GATEWAY_AI_ROUTING_ENABLED:true}
+      base-url: ${GATEWAY_AI_ROUTER_URL:http://localhost:8000}
+      timeout: 150ms
   pricing:
     fee-percent: 2.00
     gst-percent: 18.00
