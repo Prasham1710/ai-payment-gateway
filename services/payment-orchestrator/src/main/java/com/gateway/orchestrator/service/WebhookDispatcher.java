@@ -12,6 +12,7 @@ import com.gateway.orchestrator.support.Signatures;
 import com.gateway.orchestrator.support.Text;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -36,28 +37,34 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 /**
  * Delivers queued webhook events. Each delivery is POSTed with an HMAC-SHA256 signature of the raw
  * body ({@code X-Gateway-Signature}) and retried with exponential backoff until the receiver
  * answers 2xx or the attempts run out.
  *
- * <p>Fairness: due deliveries are picked oldest-first but at most
- * {@code max-in-flight-per-endpoint} per endpoint per poll (window query), so no merchant's
- * backlog crowds out others; an endpoint never has more than {@code max-in-flight-per-endpoint}
- * deliveries outstanding (a dead endpoint cannot starve the merchant's healthy ones) and a
- * merchant never more than {@code max-in-flight-per-merchant} (one merchant cannot take every
- * sender, including while its DNS lookups hang). Every request has a hard deadline. When a send
- * finishes, the dispatcher immediately looks for more work, so the caps limit concurrency, not
- * throughput.
- *
- * <p>Claimed deliveries are leased (next attempt pushed out) and tracked in memory until they
- * finish, so a delivery is never sent twice at once. Runs as a single poller per instance; several
- * instances would need row locking on the claim.
+ * <p>How work is picked, so that no merchant or endpoint can hold up the others:
+ * <ul>
+ *   <li>Endpoints, not deliveries, are scheduled: endpoints with due deliveries are served least
+ *       recently claimed first (round robin), each getting at most
+ *       {@code max-in-flight-per-endpoint} outstanding sends, and each merchant at most
+ *       {@code max-in-flight-per-merchant}.</li>
+ *   <li>An endpoint whose delivery fails is paused with exponential backoff, and only probed again
+ *       when the pause ends. Its other queued events wait without using up their attempts, and a
+ *       dead endpoint cannot keep senders busy.</li>
+ *   <li>Only as many deliveries are claimed as there are free senders; when a send finishes the
+ *       dispatcher looks for more work straight away, so the limits cap concurrency, not throughput.</li>
+ * </ul>
+ * A claimed delivery is locked and re-checked before it is leased (its next attempt pushed past the
+ * request deadline), and in-flight deliveries are also tracked in memory, so a delivery is never
+ * sent twice at once. Runs as a single dispatcher per instance; several instances would need
+ * {@code SKIP LOCKED} claiming.
  */
 @Component
 @Slf4j
@@ -66,8 +73,10 @@ public class WebhookDispatcher {
     public static final String SIGNATURE_HEADER = "X-Gateway-Signature";
     public static final String EVENT_ID_HEADER = "X-Gateway-Event-Id";
     public static final String EVENT_HEADER = "X-Gateway-Event";
-    /** How many deliveries may wait for a sender, per sender thread. */
-    private static final int QUEUE_PER_SENDER = 3;
+    /** Placeholder for an empty NOT IN list (no endpoint or merchant has an empty id). */
+    private static final Set<String> NONE = Set.of("");
+    /** Completions within this window share one refill. */
+    private static final long REFILL_DEBOUNCE_MS = 50;
 
     private final WebhookDeliveryRepository deliveryRepository;
     private final WebhookEndpointRepository endpointRepository;
@@ -78,13 +87,15 @@ public class WebhookDispatcher {
     private final TransactionTemplate tx;
     private final ExecutorService senders;
     private final int senderCount;
-    /** Re-runs {@link #dispatchDue()} when a send frees capacity; requests are coalesced. */
     private final ExecutorService refiller;
-    private final AtomicBoolean refillRequested = new AtomicBoolean();
-    /** Deliveries claimed and not yet finished (queued or being sent), counted per endpoint and per merchant. */
+
+    /** Deliveries claimed and not yet finished, counted per endpoint and per merchant. */
     private final Set<String> outstanding = ConcurrentHashMap.newKeySet();
     private final Map<String, AtomicInteger> outstandingPerEndpoint = new ConcurrentHashMap<>();
     private final Map<String, AtomicInteger> outstandingPerMerchant = new ConcurrentHashMap<>();
+    private final AtomicBoolean refillRequested = new AtomicBoolean();
+    private final AtomicInteger claimsRunning = new AtomicInteger();
+    private volatile boolean stopping;
 
     public WebhookDispatcher(WebhookDeliveryRepository deliveryRepository, WebhookEndpointRepository endpointRepository,
                              SecretCipher secretCipher, WebhookUrlGuard urlGuard, GatewayProperties properties,
@@ -101,16 +112,8 @@ public class WebhookDispatcher {
         this.tx = new TransactionTemplate(transactionManager);
         AtomicInteger threads = new AtomicInteger();
         this.senderCount = Math.max(1, settings.getConcurrency());
-        this.senders = Executors.newFixedThreadPool(senderCount, task -> {
-            Thread thread = new Thread(task, "webhook-sender-" + threads.incrementAndGet());
-            thread.setDaemon(true);
-            return thread;
-        });
-        this.refiller = Executors.newSingleThreadExecutor(task -> {
-            Thread thread = new Thread(task, "webhook-refill");
-            thread.setDaemon(true);
-            return thread;
-        });
+        this.senders = Executors.newFixedThreadPool(senderCount, task -> daemon(task, "webhook-sender-" + threads.incrementAndGet()));
+        this.refiller = Executors.newSingleThreadExecutor(task -> daemon(task, "webhook-refill"));
     }
 
     private record Job(String deliveryId, String endpointId, String merchantId, String url, String secretEncrypted,
@@ -119,16 +122,16 @@ public class WebhookDispatcher {
 
     @PreDestroy
     void shutdown() throws InterruptedException {
-        // Let in-flight sends record their outcome; anything still unfinished is retried after its lease.
-        awaitIdle(settings.getTimeout());
+        stopping = true;   // claim nothing new; let in-flight sends record their outcome
+        awaitIdle(settings.getTimeout().multipliedBy(2));
         refiller.shutdownNow();
         senders.shutdownNow();
     }
 
-    /** Waits until no delivery is queued or being sent. Returns false if that did not happen in time. */
+    /** Waits until no delivery is being claimed or sent and no refill is pending. Returns false on timeout. */
     public boolean awaitIdle(Duration timeout) throws InterruptedException {
         long deadline = System.nanoTime() + timeout.toNanos();
-        while (!outstanding.isEmpty() || refillRequested.get()) {
+        while (!outstanding.isEmpty() || refillRequested.get() || claimsRunning.get() > 0) {
             if (System.nanoTime() > deadline) {
                 return false;
             }
@@ -137,31 +140,27 @@ public class WebhookDispatcher {
         return true;
     }
 
-    private void refillSoon() {
-        if (refillRequested.compareAndSet(false, true)) {
-            try {
-                refiller.execute(() -> {
-                    refillRequested.set(false);
-                    try {
-                        dispatchDue();
-                    } catch (RuntimeException e) {
-                        log.error("Webhook refill failed", e);
-                    }
-                });
-            } catch (RuntimeException e) {   // shutting down
-                refillRequested.set(false);
-            }
+    /** Claims due deliveries and starts sending them. Returns without waiting; the futures are for callers that want to. */
+    @Scheduled(fixedDelayString = "${gateway.webhooks.poll-interval-ms:1000}")
+    public List<Future<?>> dispatchDue() {
+        claimsRunning.incrementAndGet();
+        try {
+            return claimAndSend();
+        } finally {
+            claimsRunning.decrementAndGet();
         }
     }
 
-    /** Claims due deliveries and hands them to the sender pool. Returns without waiting; the futures are for callers that want to. */
-    @Scheduled(fixedDelayString = "${gateway.webhooks.poll-interval-ms:1000}")
-    public synchronized List<Future<?>> dispatchDue() {
-        int capacity = senderCount * (1 + QUEUE_PER_SENDER) - outstanding.size();
-        if (capacity <= 0) {
+    private synchronized List<Future<?>> claimAndSend() {
+        int freeSenders = senderCount - outstanding.size();
+        if (stopping || freeSenders <= 0) {
             return List.of();
         }
-        List<Job> jobs = tx.execute(status -> claimDue(capacity));
+        Set<String> busyEndpoints = atLimit(outstandingPerEndpoint, settings.getMaxInFlightPerEndpoint());
+        Set<String> busyMerchants = atLimit(outstandingPerMerchant, settings.getMaxInFlightPerMerchant());
+        Set<String> inFlight = Set.copyOf(outstanding);
+        List<Job> jobs = tx.execute(status -> claim(freeSenders, busyEndpoints, busyMerchants, inFlight));
+
         List<Future<?>> sends = new ArrayList<>();
         for (Job job : jobs) {
             AtomicInteger perEndpoint = outstandingPerEndpoint.computeIfAbsent(job.endpointId(), id -> new AtomicInteger());
@@ -181,63 +180,93 @@ public class WebhookDispatcher {
                     } catch (RuntimeException e) {
                         log.error("Webhook delivery {} crashed", job.deliveryId(), e);
                     } finally {
+                        refillSoon();      // requested before the slot is released, so awaitIdle never sees a gap
                         finished.run();
-                        refillSoon();
                     }
                 }));
-            } catch (RuntimeException e) {   // pool shut down
+            } catch (RejectedExecutionException e) {   // shutting down
                 finished.run();
-                throw e;
             }
         }
         return sends;
     }
 
-    private List<Job> claimDue(int capacity) {
+    private List<Job> claim(int freeSenders, Set<String> busyEndpoints, Set<String> busyMerchants, Set<String> inFlight) {
         Instant now = Instant.now();
-        // Covers the DNS check, the request deadline and some queueing; an expired lease is harmless
-        // because outstanding deliveries are skipped below anyway.
+        // Covers the DNS check and the request deadline; deliveries still in flight are skipped anyway.
         Instant leaseUntil = now.plus(settings.getTimeout().multipliedBy(3));
-        int perEndpointCap = settings.getMaxInFlightPerEndpoint();
-        int perMerchantCap = settings.getMaxInFlightPerMerchant();
-        List<String> candidates = deliveryRepository.findDueIdsFairly(now, perEndpointCap,
-                Math.max(settings.getBatchSize(), capacity * 3));
-        Map<String, WebhookDelivery> deliveries = new HashMap<>();
-        deliveryRepository.findAllById(candidates).forEach(d -> deliveries.put(d.getId(), d));
+        List<String> endpointIds = endpointRepository.findDispatchable(now, DeliveryStatus.PENDING,
+                orNone(busyEndpoints), orNone(busyMerchants), PageRequest.of(0, freeSenders));
 
-        Map<String, Integer> claimedPerEndpoint = new HashMap<>();
         Map<String, Integer> claimedPerMerchant = new HashMap<>();
         List<Job> jobs = new ArrayList<>();
-        for (String id : candidates) {
-            WebhookDelivery delivery = deliveries.get(id);
-            if (jobs.size() >= capacity) {
+        for (String endpointId : endpointIds) {
+            if (jobs.size() >= freeSenders) {
                 break;
             }
-            if (delivery == null || outstanding.contains(id) || delivery.getStatus() != DeliveryStatus.PENDING) {
+            WebhookEndpoint endpoint = endpointRepository.findById(endpointId).orElse(null);
+            if (endpoint == null) {
                 continue;
             }
-            if (count(outstandingPerEndpoint, delivery.getEndpointId()) + claimedPerEndpoint.getOrDefault(delivery.getEndpointId(), 0) >= perEndpointCap
-                    || count(outstandingPerMerchant, delivery.getMerchantId()) + claimedPerMerchant.getOrDefault(delivery.getMerchantId(), 0) >= perMerchantCap) {
-                continue;   // stays due; picked up once the endpoint/merchant has capacity again
+            int inFlightForEndpoint = count(outstandingPerEndpoint, endpointId);
+            int room = settings.getMaxInFlightPerEndpoint() - inFlightForEndpoint;
+            boolean claimedAny = false;
+            // Ask for a few extra rows: some due rows may be deliveries still in flight whose lease ran out.
+            for (String deliveryId : deliveryRepository.findDueIdsForEndpoint(endpointId, DeliveryStatus.PENDING, now,
+                    PageRequest.of(0, Math.max(1, room + inFlightForEndpoint)))) {
+                int merchantLoad = count(outstandingPerMerchant, endpoint.getMerchantId())
+                        + claimedPerMerchant.getOrDefault(endpoint.getMerchantId(), 0);
+                if (room <= 0 || jobs.size() >= freeSenders || merchantLoad >= settings.getMaxInFlightPerMerchant()) {
+                    break;
+                }
+                if (inFlight.contains(deliveryId)) {
+                    continue;
+                }
+                // Re-check under the row lock: it may have been delivered or re-scheduled since it was listed.
+                WebhookDelivery delivery = deliveryRepository.findByIdForUpdate(deliveryId).orElse(null);
+                if (delivery == null || delivery.getStatus() != DeliveryStatus.PENDING || delivery.getNextAttemptAt().isAfter(now)) {
+                    continue;
+                }
+                delivery.setNextAttemptAt(leaseUntil);
+                jobs.add(new Job(delivery.getId(), endpointId, endpoint.getMerchantId(), endpoint.getUrl(),
+                        endpoint.getSecretEncrypted(), delivery.getEventId(), delivery.getEvent(), delivery.getPayload()));
+                room--;
+                claimedPerMerchant.merge(endpoint.getMerchantId(), 1, Integer::sum);
+                claimedAny = true;
             }
-            WebhookEndpoint endpoint = endpointRepository.findById(delivery.getEndpointId()).orElse(null);
-            if (endpoint == null || !endpoint.isActive()) {
-                delivery.setStatus(DeliveryStatus.FAILED);
-                delivery.setLastError("Webhook endpoint no longer exists or is inactive");
-                continue;
+            if (claimedAny) {
+                endpointRepository.markClaimed(endpointId, now);
             }
-            claimedPerEndpoint.merge(delivery.getEndpointId(), 1, Integer::sum);
-            claimedPerMerchant.merge(delivery.getMerchantId(), 1, Integer::sum);
-            delivery.setNextAttemptAt(leaseUntil);
-            jobs.add(new Job(delivery.getId(), delivery.getEndpointId(), delivery.getMerchantId(), endpoint.getUrl(),
-                    endpoint.getSecretEncrypted(), delivery.getEventId(), delivery.getEvent(), delivery.getPayload()));
         }
         return jobs;
     }
 
-    private static int count(Map<String, AtomicInteger> counters, String key) {
-        AtomicInteger counter = counters.get(key);
-        return counter == null ? 0 : counter.get();
+    private void refillSoon() {
+        if (stopping || !refillRequested.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            refiller.execute(() -> {
+                try {
+                    Thread.sleep(REFILL_DEBOUNCE_MS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    refillRequested.set(false);
+                    return;
+                }
+                claimsRunning.incrementAndGet();
+                refillRequested.set(false);
+                try {
+                    claimAndSend();
+                } catch (RuntimeException e) {
+                    log.error("Webhook refill failed", e);
+                } finally {
+                    claimsRunning.decrementAndGet();
+                }
+            });
+        } catch (RejectedExecutionException e) {   // shutting down
+            refillRequested.set(false);
+        }
     }
 
     private void send(Job job) {
@@ -260,7 +289,7 @@ public class WebhookDispatcher {
         }
         Integer responseCode = statusCode;
         String failure = error;
-        tx.executeWithoutResult(status -> record(job.deliveryId(), responseCode, failure));
+        tx.executeWithoutResult(status -> record(job, responseCode, failure));
     }
 
     /** POSTs the signed payload; the response body is discarded and the whole exchange must finish within the timeout. */
@@ -302,17 +331,19 @@ public class WebhookDispatcher {
         }
     }
 
-    private void record(String deliveryId, Integer statusCode, String error) {
-        WebhookDelivery delivery = deliveryRepository.findByIdForUpdate(deliveryId).orElseThrow();
+    private void record(Job job, Integer statusCode, String error) {
+        WebhookDelivery delivery = deliveryRepository.findByIdForUpdate(job.deliveryId()).orElseThrow();
         if (delivery.getStatus() != DeliveryStatus.PENDING) {
             return;
         }
+        Instant now = Instant.now();
         delivery.setAttempts(delivery.getAttempts() + 1);
         delivery.setLastResponseCode(statusCode);
         if (error == null) {
             delivery.setStatus(DeliveryStatus.DELIVERED);
-            delivery.setDeliveredAt(Instant.now());
+            delivery.setDeliveredAt(now);
             delivery.setLastError(null);
+            endpointRepository.markHealthy(job.endpointId());
             log.info("Delivered {} {} (attempt {})", delivery.getEvent(), delivery.getEventId(), delivery.getAttempts());
             return;
         }
@@ -321,14 +352,39 @@ public class WebhookDispatcher {
             delivery.setStatus(DeliveryStatus.FAILED);
             log.warn("Giving up on {} {} after {} attempts: {}", delivery.getEvent(), delivery.getEventId(), delivery.getAttempts(), error);
         } else {
-            delivery.setNextAttemptAt(Instant.now().plus(backoff(delivery.getAttempts())));
+            delivery.setNextAttemptAt(now.plus(backoff(delivery.getAttempts())));
             log.warn("Delivery of {} {} failed (attempt {}): {}", delivery.getEvent(), delivery.getEventId(), delivery.getAttempts(), error);
         }
+        // Pause the whole endpoint, so its other queued events wait instead of each failing in turn.
+        int failures = endpointRepository.findById(job.endpointId()).map(WebhookEndpoint::getConsecutiveFailures).orElse(0) + 1;
+        endpointRepository.markFailing(job.endpointId(), now.plus(backoff(failures)));
     }
 
     /** base, 2x base, 4x base, ... capped at maxBackoff. */
     private Duration backoff(int attempts) {
-        Duration delay = settings.getBaseBackoff().multipliedBy(1L << Math.min(attempts - 1, 20));
+        Duration delay = settings.getBaseBackoff().multipliedBy(1L << Math.min(Math.max(attempts, 1) - 1, 20));
         return delay.compareTo(settings.getMaxBackoff()) > 0 ? settings.getMaxBackoff() : delay;
+    }
+
+    private static Set<String> atLimit(Map<String, AtomicInteger> counters, int limit) {
+        return counters.entrySet().stream()
+                .filter(e -> e.getValue().get() >= limit)
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toSet());
+    }
+
+    private static Set<String> orNone(Set<String> ids) {
+        return ids.isEmpty() ? NONE : ids;
+    }
+
+    private static int count(Map<String, AtomicInteger> counters, String key) {
+        AtomicInteger counter = counters.get(key);
+        return counter == null ? 0 : counter.get();
+    }
+
+    private static Thread daemon(Runnable task, String name) {
+        Thread thread = new Thread(task, name);
+        thread.setDaemon(true);
+        return thread;
     }
 }

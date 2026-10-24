@@ -89,7 +89,7 @@ On top of the orchestrator sits a **Razorpay-style merchant platform**: merchant
 - [x] **Payment signature:** `HMAC_SHA256(order_id|payment_id, key_secret)` returned by checkout for server-side verification.
 - [x] **Refunds:** full/partial, reversal of uncaptured authorizations, amount reserved up front (no over-refund under concurrency), `pending` refunds retried in the background, unconfirmed refunds never released; simulator refunds are idempotent per `refund_id` (including concurrent retries).
 - [x] **Reconciliation:** late authorizations for charges the bank confirms after a timeout/502, crash recovery for interrupted checkouts, automatic refunds of authorizations that can no longer be captured.
-- [x] **Webhooks:** 7 events, transactional outbox (`webhook_deliveries`), HMAC-SHA256 `X-Gateway-Signature`, parallel delivery with exponential backoff, delivery log API, SSRF protection for webhook URLs.
+- [x] **Webhooks:** 7 events, transactional outbox (`webhook_deliveries`), HMAC-SHA256 `X-Gateway-Signature`, parallel delivery with exponential backoff, endpoints served round robin with per-endpoint/per-merchant limits, failing endpoints paused instead of retried in a loop, delivery log API, SSRF protection for webhook URLs.
 - [x] **Smarter failover:** fail over only when a rail definitely did not process the charge; declines and unknown outcomes are never retried on another rail.
 - [x] **Razorpay API conventions:** prefixed ids, snake_case JSON, Razorpay-style error objects, paginated collections, `Idempotency-Key` on checkout and refunds.
 - [x] **Tests:** Spring Boot integration tests (H2 + in-process fake bank) and Go handler tests (`go test -race`).

@@ -191,7 +191,7 @@ Respond with any `2xx` within 5 seconds. Failed deliveries are retried with expo
 
 Events can arrive out of order (for example `payment.captured` before `payment.authorized`) and an event can arrive more than once. Use `X-Gateway-Event-Id` to ignore duplicates, and use the entity's `status` rather than the arrival order.
 
-Webhook URLs must resolve to public addresses. Loopback, private, link-local and similar addresses are refused, both when the endpoint is registered and before each delivery. To test with a receiver on your own machine, start the orchestrator with `GATEWAY_WEBHOOKS_ALLOW_PRIVATE_NETWORK=true`. Each merchant can register up to 10 endpoints. At most 2 deliveries per endpoint and 4 per merchant are in flight at a time, so a slow or dead receiver only delays its own events.
+Webhook URLs must resolve to public addresses. Loopback, private, link-local and similar addresses are refused, both when the endpoint is registered and before each delivery. To test with a receiver on your own machine, start the orchestrator with `GATEWAY_WEBHOOKS_ALLOW_PRIVATE_NETWORK=true`. Each merchant can register up to 10 endpoints. Endpoints are served round robin, with at most 2 deliveries per endpoint and 4 per merchant in flight, so a slow receiver only delays its own events. An endpoint that fails is paused with increasing back-off (up to an hour) and then probed again. Its other queued events wait during the pause without using up their retry attempts, and are delivered once it recovers.
 
 ## API reference
 

@@ -12,7 +12,8 @@ import java.time.Instant;
 @Entity
 @Table(name = "webhook_deliveries", indexes = {
     @Index(name = "idx_delivery_due", columnList = "status, next_attempt_at"),
-    @Index(name = "idx_delivery_endpoint", columnList = "endpoint_id, created_at")
+    @Index(name = "idx_delivery_endpoint", columnList = "endpoint_id, created_at"),
+    @Index(name = "idx_delivery_endpoint_due", columnList = "endpoint_id, status, next_attempt_at")
 })
 @Getter
 @Setter

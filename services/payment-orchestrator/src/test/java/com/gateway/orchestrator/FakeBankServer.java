@@ -52,6 +52,7 @@ public class FakeBankServer implements AutoCloseable {
     private final List<ReceivedWebhook> webhooks = new CopyOnWriteArrayList<>();
     private volatile RefundMode refundMode = RefundMode.PROCESS;
     private volatile int webhookStatus = 200;
+    private AtomicInteger failingWebhookCalls;
 
     public FakeBankServer() throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -61,6 +62,8 @@ public class FakeBankServer implements AutoCloseable {
         server.createContext("/api/v1/bank/refund", this::refund);
         server.createContext("/hooks", this::webhook);
         server.createContext("/hooks/slow", this::slowWebhook);
+        server.createContext("/hooks/fail", this::failingWebhook);
+        failingWebhookCalls = new AtomicInteger();
         server.start();
     }
 
@@ -195,6 +198,18 @@ public class FakeBankServer implements AutoCloseable {
                 exchange.getRequestHeaders().getFirst("X-Gateway-Event-Id"),
                 exchange.getRequestHeaders().getFirst("X-Gateway-Event")));
         exchange.sendResponseHeaders(webhookStatus, -1);
+        exchange.close();
+    }
+
+    public int failingWebhookCalls() {
+        return failingWebhookCalls.get();
+    }
+
+    /** A receiver that is down: answers 500 straight away. */
+    private void failingWebhook(HttpExchange exchange) throws IOException {
+        exchange.getRequestBody().readAllBytes();
+        failingWebhookCalls.incrementAndGet();
+        exchange.sendResponseHeaders(500, -1);
         exchange.close();
     }
 

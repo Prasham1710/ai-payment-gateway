@@ -17,16 +17,10 @@ import java.util.Optional;
 
 @Repository
 public interface WebhookDeliveryRepository extends JpaRepository<WebhookDelivery, String> {
-    /**
-     * Due pending deliveries, oldest first, but at most {@code perEndpoint} per endpoint, so one
-     * endpoint's backlog cannot fill the batch and hide everyone else's deliveries.
-     */
-    @Query(value = "select id from (select d.id, d.next_attempt_at, row_number() over "
-            + "(partition by d.endpoint_id order by d.next_attempt_at, d.id) as rank_in_endpoint "
-            + "from webhook_deliveries d where d.status = 'PENDING' and d.next_attempt_at <= :now) ranked "
-            + "where rank_in_endpoint <= :perEndpoint order by next_attempt_at, id limit :maxRows", nativeQuery = true)
-    List<String> findDueIdsFairly(@Param("now") Instant now, @Param("perEndpoint") int perEndpoint,
-                                  @Param("maxRows") int maxRows);
+    @Query("select d.id from WebhookDelivery d where d.endpointId = :endpointId and d.status = :pending "
+            + "and d.nextAttemptAt <= :now order by d.nextAttemptAt, d.id")
+    List<String> findDueIdsForEndpoint(@Param("endpointId") String endpointId, @Param("pending") DeliveryStatus pending,
+                                       @Param("now") Instant now, Pageable pageable);
 
     List<WebhookDelivery> findByEndpointIdOrderByCreatedAtDesc(String endpointId, Pageable pageable);
 

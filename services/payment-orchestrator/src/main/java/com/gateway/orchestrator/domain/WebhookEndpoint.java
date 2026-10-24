@@ -40,6 +40,18 @@ public class WebhookEndpoint {
     @Column(nullable = false)
     private boolean active;
 
+    /** Failed deliveries in a row; any success resets it. */
+    @Column(name = "consecutive_failures", nullable = false, columnDefinition = "integer default 0 not null")
+    private int consecutiveFailures;
+
+    /** While set and in the future, no deliveries are sent to this endpoint (it is failing). */
+    @Column(name = "paused_until")
+    private Instant pausedUntil;
+
+    /** Last time the dispatcher picked a delivery for this endpoint; used to serve endpoints round robin. */
+    @Column(name = "last_claimed_at")
+    private Instant lastClaimedAt;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 

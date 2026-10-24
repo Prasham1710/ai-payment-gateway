@@ -528,7 +528,32 @@ class ReliabilityIntegrationTest extends IntegrationTestSupport {
     }
 
     @Test
-    void onePollQueuesMoreDeliveriesThanThereAreSenders() {
+    void failingEndpointIsPausedAndItsQueuedEventsKeepTheirAttempts() throws InterruptedException {
+        Keys failing = signup();
+        Keys healthy = signup();
+        String failHook = as(failing).postForObject("/v1/webhooks", Map.of("url", BANK.baseUrl() + "/hooks/fail",
+                "secret", "whsec_test_123", "events", List.of("payment.captured")), JsonNode.class).get("id").asText();
+        String okHook = as(healthy).postForObject("/v1/webhooks", Map.of("url", BANK.baseUrl() + "/hooks",
+                "secret", "whsec_test_123", "events", List.of("payment.captured")), JsonNode.class).get("id").asText();
+        for (int i = 0; i < 5; i++) {
+            capturedPayment(failing, 10000);
+        }
+        capturedPayment(healthy, 10000);
+
+        awaitAll(webhookDispatcher.dispatchDue());
+        // Refills triggered by those sends must not touch the paused endpoint.
+        assertThat(webhookDispatcher.awaitIdle(Duration.ofSeconds(2))).isTrue();
+
+        assertThat(deliveredCount(healthy, okHook)).isEqualTo(1);
+        assertThat(BANK.failingWebhookCalls()).as("only the first probes reach the failing receiver").isEqualTo(2);
+        JsonNode queued = as(failing).getForObject("/v1/webhooks/" + failHook + "/deliveries", JsonNode.class);
+        List<Integer> attempts = new java.util.ArrayList<>();
+        queued.get("items").forEach(item -> attempts.add(item.get("attempts").asInt()));
+        assertThat(attempts).as("the rest wait without using up attempts").containsExactlyInAnyOrder(1, 1, 0, 0, 0);
+    }
+
+    @Test
+    void burstIsDeliveredQuicklyAcrossEndpoints() {
         List<Keys> merchants = new java.util.ArrayList<>();
         for (int i = 0; i < 9; i++) {
             Keys keys = signup();
@@ -539,8 +564,8 @@ class ReliabilityIntegrationTest extends IntegrationTestSupport {
         }
 
         List<Future<?>> sends = webhookDispatcher.dispatchDue();
-        assertThat(sends).as("2 per endpoint across 9 endpoints, more than the 16 senders").hasSize(18);
-        // Each finished send immediately frees capacity for that endpoint's next delivery.
+        assertThat(sends).as("one claim fills every sender").hasSize(16);
+        // Each finished send immediately frees capacity for the next delivery.
         await().atMost(Duration.ofSeconds(5)).until(() -> BANK.webhooks().size() == 27);
     }
 
