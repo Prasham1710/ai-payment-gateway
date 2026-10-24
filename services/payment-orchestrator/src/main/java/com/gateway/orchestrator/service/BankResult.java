@@ -13,7 +13,7 @@ public record BankResult(Outcome outcome, BankResponse body, int latencyMs, Stri
         UNAVAILABLE,
         /** No usable answer; the request may or may not have been processed. */
         UNKNOWN,
-        /** Status enquiry only: the bank has no record of the transaction (yet). */
+        /** Status enquiry only: the bank has no record of the transaction (it records charges on receipt). */
         NOT_FOUND
     }
 

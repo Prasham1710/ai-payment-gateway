@@ -10,6 +10,7 @@ import com.gateway.orchestrator.dto.WebhookCreateRequest;
 import com.gateway.orchestrator.dto.WebhookDeliveryResponse;
 import com.gateway.orchestrator.dto.WebhookResponse;
 import com.gateway.orchestrator.exception.GatewayException;
+import com.gateway.orchestrator.repository.MerchantRepository;
 import com.gateway.orchestrator.repository.WebhookDeliveryRepository;
 import com.gateway.orchestrator.repository.WebhookEndpointRepository;
 import com.gateway.orchestrator.config.GatewayProperties;
@@ -49,6 +50,7 @@ public class WebhookService {
     private static final int MAX_SECRET_LENGTH = 128;
 
     private final WebhookEndpointRepository endpointRepository;
+    private final MerchantRepository merchantRepository;
     private final WebhookDeliveryRepository deliveryRepository;
     private final SecretCipher secretCipher;
     private final WebhookUrlGuard urlGuard;
@@ -74,14 +76,21 @@ public class WebhookService {
         if (blocked != null) {
             throw GatewayException.badRequest("The url is not allowed: " + blocked + ".", "url");
         }
-        WebhookEndpoint endpoint = tx.execute(status -> endpointRepository.save(WebhookEndpoint.builder()
+        WebhookEndpoint endpoint = tx.execute(status -> {
+            // Re-check the cap under the merchant's row lock: the check above ran before a possibly slow DNS lookup.
+            merchantRepository.findByIdForUpdate(merchant.getId()).orElseThrow();
+            if (endpointRepository.countByMerchantId(merchant.getId()) >= maxEndpoints) {
+                throw GatewayException.badRequest("A merchant can have at most " + maxEndpoints + " webhook endpoints.", "url");
+            }
+            return endpointRepository.save(WebhookEndpoint.builder()
                 .id(Ids.newId("wh"))
                 .merchantId(merchant.getId())
                 .url(uri.toString())
                 .secretEncrypted(secretCipher.encrypt(req.getSecret()))
                 .events(events)
                 .active(true)
-                .build()));
+                .build());
+        });
         return EntityMapper.toResponse(endpoint);
     }
 

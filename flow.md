@@ -62,7 +62,7 @@ On top of the orchestrator sits a **Razorpay-style merchant platform**: merchant
 
 ### Reconciliation & Automatic Refunds
 
-- **Reconciler** (every 30s): re-checks `failed` payments with an unknown outcome for up to 24h, and settles checkouts that died mid-flight (`created` for more than 2 minutes). A charge the bank confirms becomes a **late authorization** (`failed → authorized`), then is captured as usual.
+- **Reconciler** (every 30s, backing off as a payment ages): re-checks `failed` payments with an unknown outcome for up to 24h, and settles checkouts that died mid-flight (`created` for more than 2 minutes). Every bank attempt is written before it is sent, so even a crash mid-call leaves a transaction id to ask the bank about. A charge the bank confirms becomes a **late authorization** (`failed → authorized`), then is captured as usual. The bank records charges as `PENDING` on receipt, so "not found" means it never arrived; that is only taken as final at the end of the 24h window.
 - **Automatic refunds** (every 30s): an `authorized` payment that can no longer be captured (its order was paid by another payment, or it is older than the 5-day capture window) is refunded in full.
 - **Refund retries** (every 5s): `pending` refunds are retried; a refund whose outcome is unknown is never released, so the payment can never be refunded twice.
 

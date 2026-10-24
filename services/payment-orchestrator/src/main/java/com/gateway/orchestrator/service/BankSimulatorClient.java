@@ -33,6 +33,7 @@ import java.util.function.Supplier;
 public class BankSimulatorClient {
 
     private static final Set<String> APPROVED = Set.of("SUCCESS", "PROCESSED");
+    private static final String PENDING = "PENDING";
     private static final int SERVICE_UNAVAILABLE = 503;
 
     private final RestTemplate restTemplate;
@@ -103,6 +104,10 @@ public class BankSimulatorClient {
         }
         if (bankStatus == null) {
             return new BankResult(BankResult.Outcome.UNKNOWN, body, latency, "Unreadable bank response (HTTP " + status + ")");
+        }
+        if (PENDING.equals(bankStatus)) {
+            // The bank has the request and is still working on it.
+            return new BankResult(BankResult.Outcome.UNKNOWN, body, latency, "Still being processed by the bank");
         }
         return APPROVED.contains(bankStatus)
                 ? new BankResult(BankResult.Outcome.SUCCESS, body, latency, null)

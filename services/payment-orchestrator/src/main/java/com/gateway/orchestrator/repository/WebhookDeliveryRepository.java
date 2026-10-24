@@ -19,9 +19,10 @@ import java.util.Optional;
 @Repository
 public interface WebhookDeliveryRepository extends JpaRepository<WebhookDelivery, String> {
     @Query("select d from WebhookDelivery d where d.status = :status and d.nextAttemptAt <= :now "
-            + "and d.endpointId not in :excludedEndpoints order by d.nextAttemptAt")
+            + "and d.merchantId not in :excludedMerchants and d.id not in :excludedDeliveries order by d.nextAttemptAt")
     List<WebhookDelivery> findDue(@Param("status") DeliveryStatus status, @Param("now") Instant now,
-                                  @Param("excludedEndpoints") Collection<String> excludedEndpoints, Pageable pageable);
+                                  @Param("excludedMerchants") Collection<String> excludedMerchants,
+                                  @Param("excludedDeliveries") Collection<String> excludedDeliveries, Pageable pageable);
 
     List<WebhookDelivery> findByEndpointIdOrderByCreatedAtDesc(String endpointId, Pageable pageable);
 

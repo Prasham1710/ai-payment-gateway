@@ -303,7 +303,7 @@ class ReliabilityIntegrationTest extends IntegrationTestSupport {
     }
 
     @Test
-    void attemptTheBankNeverReceivedIsSettledAsNotProcessed() {
+    void attemptTheBankNeverReceivedIsSettledOnlyAtTheEndOfTheWindow() {
         Keys keys = signup();
         String orderId = createOrder(keys, Map.of("amount", 9900)).get("id").asText();
         // Crashed after writing the attempt but before sending it: the bank has no record of it.
@@ -313,11 +313,93 @@ class ReliabilityIntegrationTest extends IntegrationTestSupport {
 
         reconciler.reconcile(paymentId);
         assertThat(payment(keys, paymentId).get("status").asText()).isEqualTo("failed");
-        assertThat(attemptOf(paymentId).getStatus()).isEqualTo(AttemptStatus.UNAVAILABLE);
+        assertThat(attemptOf(paymentId).getStatus()).as("not found is not final yet").isEqualTo(AttemptStatus.UNKNOWN);
+        assertThat(paymentRepository.findById(paymentId).orElseThrow().getReconcileUntil()).isNotNull();
 
+        jdbc.update("update payments set reconcile_until = ? where id = ?", Timestamp.from(Instant.now().minusSeconds(1)), paymentId);
         reconciler.reconcile(paymentId);
+        assertThat(attemptOf(paymentId).getStatus()).isEqualTo(AttemptStatus.UNAVAILABLE);
         assertThat(paymentRepository.findById(paymentId).orElseThrow().getReconcileUntil())
                 .as("nothing left to ask the bank about").isNull();
+    }
+
+    @Test
+    void chargeTheBankRecordsLongAfterTheTimeoutIsStillFound() {
+        Keys keys = signup();
+        BANK.setMode("provider-a", Mode.GATEWAY_ERROR);   // bank has the charge but answers "not found" for now
+        String orderId = createOrder(keys, Map.of("amount", 9900)).get("id").asText();
+        String paymentId = pay(keys, orderId, Map.of("method", "upi", "vpa", "ravi@okaxis"))
+                .getBody().at("/error/metadata/payment_id").asText();
+        jdbc.update("update transactions set created_at = ? where payment_id = ?",
+                Timestamp.from(Instant.now().minus(Duration.ofMinutes(10))), paymentId);
+
+        reconciler.reconcile(paymentId);
+        assertThat(attemptOf(paymentId).getStatus()).isEqualTo(AttemptStatus.UNKNOWN);
+
+        BANK.settlePendingCharges();
+        reconciler.reconcile(paymentId);
+        assertThat(payment(keys, paymentId).get("status").asText()).isEqualTo("captured");
+    }
+
+    @Test
+    void paymentsWaitingBeforeAnUpgradeAreStillReconciled() {
+        Keys keys = signup();
+        BANK.setMode("provider-a", Mode.GATEWAY_ERROR);
+        String orderId = createOrder(keys, Map.of("amount", 9900)).get("id").asText();
+        String paymentId = pay(keys, orderId, Map.of("method", "upi", "vpa", "ravi@okaxis"))
+                .getBody().at("/error/metadata/payment_id").asText();
+        // A row from before reconcile_after existed.
+        jdbc.update("update payments set reconcile_after = null where id = ?", paymentId);
+        BANK.settlePendingCharges();
+
+        reconciler.reconcileDue();
+        assertThat(payment(keys, paymentId).get("status").asText()).isEqualTo("captured");
+    }
+
+    @Test
+    void concurrentWebhookRegistrationsCannotExceedTheLimit() throws Exception {
+        Keys keys = signup();
+        for (int i = 0; i < 9; i++) {
+            as(keys).postForEntity("/v1/webhooks", Map.of("url", BANK.baseUrl() + "/hooks/" + i,
+                    "secret", "whsec_test_123", "events", List.of("*")), JsonNode.class);
+        }
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(10);
+        try {
+            List<java.util.concurrent.Callable<HttpStatus>> creates = new java.util.ArrayList<>();
+            for (int i = 0; i < 10; i++) {
+                int n = i;
+                creates.add(() -> HttpStatus.valueOf(as(keys).postForEntity("/v1/webhooks", Map.of("url", BANK.baseUrl() + "/hooks/c" + n,
+                        "secret", "whsec_test_123", "events", List.of("*")), JsonNode.class).getStatusCode().value()));
+            }
+            long created = 0;
+            for (Future<HttpStatus> result : pool.invokeAll(creates)) {
+                created += result.get() == HttpStatus.OK ? 1 : 0;
+            }
+            assertThat(created).isEqualTo(1);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(as(keys).getForObject("/v1/webhooks", JsonNode.class).get("count").asInt()).isEqualTo(10);
+    }
+
+    @Test
+    void unreadableWebhookSecretOnlyAffectsItsOwnEndpoint() {
+        Keys broken = signup();
+        Keys healthy = signup();
+        String brokenHook = as(broken).postForObject("/v1/webhooks", Map.of("url", BANK.baseUrl() + "/hooks",
+                "secret", "whsec_test_123", "events", List.of("payment.captured")), JsonNode.class).get("id").asText();
+        String healthyHook = as(healthy).postForObject("/v1/webhooks", Map.of("url", BANK.baseUrl() + "/hooks",
+                "secret", "whsec_test_123", "events", List.of("payment.captured")), JsonNode.class).get("id").asText();
+        jdbc.update("update webhook_endpoints set secret_encrypted = 'not-a-valid-ciphertext' where id = ?", brokenHook);
+        capturedPayment(broken, 10000);
+        capturedPayment(healthy, 10000);
+
+        awaitAll(webhookDispatcher.dispatchDue());
+
+        assertThat(as(healthy).getForObject("/v1/webhooks/" + healthyHook + "/deliveries", JsonNode.class)
+                .at("/items/0/status").asText()).isEqualTo("delivered");
+        assertThat(as(broken).getForObject("/v1/webhooks/" + brokenHook + "/deliveries", JsonNode.class)
+                .at("/items/0/last_error").asText()).contains("could not be decrypted");
     }
 
     @Test
@@ -394,7 +476,8 @@ class ReliabilityIntegrationTest extends IntegrationTestSupport {
         long start = System.nanoTime();
         List<Future<?>> sends = webhookDispatcher.dispatchDue();
         assertThat(Duration.ofNanos(System.nanoTime() - start)).as("the poll does not wait for receivers").isLessThan(Duration.ofMillis(500));
-        assertThat(sends).as("at most 2 in flight per endpoint, plus the normal one").hasSize(3);
+        assertThat(sends).as("at most 2 in flight per merchant, plus the normal one").hasSize(3);
+        assertThat(webhookDispatcher.dispatchDue()).as("the slow merchant is at its limit").isEmpty();
 
         await().atMost(Duration.ofMillis(800)).until(() -> "delivered".equals(
                 as(normalMerchant).getForObject("/v1/webhooks/" + normalHook + "/deliveries", JsonNode.class).at("/items/0/status").asText()));

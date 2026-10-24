@@ -46,11 +46,13 @@ import java.util.stream.Collectors;
  * body ({@code X-Gateway-Signature}) and retried with exponential backoff until the receiver
  * answers 2xx or the attempts run out.
  *
- * <p>One receiver cannot hold up everyone else: every request has a hard deadline (headers and
- * body), the poll hands deliveries to a sender pool without waiting for them, and an endpoint never
- * has more than {@link #MAX_IN_FLIGHT_PER_ENDPOINT} deliveries in flight. A claimed delivery is
- * leased (its next attempt pushed past the deadline) so later polls skip it while it is being sent.
- * Runs as a single poller per instance; several instances would need row locking on the claim.
+ * <p>One receiver cannot hold up everyone else: every request (and its DNS check) has a hard
+ * deadline, the poll hands deliveries to the sender pool without waiting for them, it only claims
+ * as many deliveries as there are free senders, and a merchant never has more than
+ * {@code gateway.webhooks.max-in-flight-per-merchant} deliveries outstanding. A claimed delivery is
+ * leased (its next attempt pushed past the deadline) and tracked in memory until it finishes, so it
+ * is never sent twice at once. Runs as a single poller per instance; several instances would need
+ * row locking on the claim.
  */
 @Component
 @Slf4j
@@ -59,9 +61,8 @@ public class WebhookDispatcher {
     public static final String SIGNATURE_HEADER = "X-Gateway-Signature";
     public static final String EVENT_ID_HEADER = "X-Gateway-Event-Id";
     public static final String EVENT_HEADER = "X-Gateway-Event";
-    static final int MAX_IN_FLIGHT_PER_ENDPOINT = 2;
-    /** Placeholder for an empty NOT IN list (no endpoint has an empty id). */
-    private static final String NO_ENDPOINT = "";
+    /** Placeholder for an empty NOT IN list (no merchant or delivery has an empty id). */
+    private static final Set<String> NONE = Set.of("");
 
     private final WebhookDeliveryRepository deliveryRepository;
     private final WebhookEndpointRepository endpointRepository;
@@ -71,7 +72,10 @@ public class WebhookDispatcher {
     private final HttpClient httpClient;
     private final TransactionTemplate tx;
     private final ExecutorService senders;
-    private final Map<String, AtomicInteger> inFlightPerEndpoint = new ConcurrentHashMap<>();
+    private final int senderCount;
+    /** Deliveries claimed and not yet finished (queued or being sent), and how many each merchant has. */
+    private final Set<String> outstanding = ConcurrentHashMap.newKeySet();
+    private final Map<String, AtomicInteger> outstandingPerMerchant = new ConcurrentHashMap<>();
 
     public WebhookDispatcher(WebhookDeliveryRepository deliveryRepository, WebhookEndpointRepository endpointRepository,
                              SecretCipher secretCipher, WebhookUrlGuard urlGuard, GatewayProperties properties,
@@ -87,15 +91,16 @@ public class WebhookDispatcher {
                 .build();
         this.tx = new TransactionTemplate(transactionManager);
         AtomicInteger threads = new AtomicInteger();
-        this.senders = Executors.newFixedThreadPool(Math.max(1, settings.getConcurrency()), task -> {
+        this.senderCount = Math.max(1, settings.getConcurrency());
+        this.senders = Executors.newFixedThreadPool(senderCount, task -> {
             Thread thread = new Thread(task, "webhook-sender-" + threads.incrementAndGet());
             thread.setDaemon(true);
             return thread;
         });
     }
 
-    private record Job(String deliveryId, String endpointId, String url, String secret, String eventId, String event,
-                       String payload) {
+    private record Job(String deliveryId, String merchantId, String url, String secretEncrypted, String eventId,
+                       String event, String payload) {
     }
 
     @PreDestroy
@@ -105,16 +110,27 @@ public class WebhookDispatcher {
 
     /** Claims due deliveries and hands them to the sender pool. Returns without waiting; the futures are for callers that want to. */
     @Scheduled(fixedDelayString = "${gateway.webhooks.poll-interval-ms:2000}")
-    public List<Future<?>> dispatchDue() {
-        Set<String> busy = inFlightPerEndpoint.entrySet().stream()
-                .filter(e -> e.getValue().get() >= MAX_IN_FLIGHT_PER_ENDPOINT)
+    public synchronized List<Future<?>> dispatchDue() {
+        int freeSenders = senderCount - outstanding.size();
+        if (freeSenders <= 0) {
+            return List.of();
+        }
+        Set<String> busyMerchants = outstandingPerMerchant.entrySet().stream()
+                .filter(e -> e.getValue().get() >= settings.getMaxInFlightPerMerchant())
                 .map(Map.Entry::getKey)
                 .collect(Collectors.toSet());
-        List<Job> jobs = tx.execute(status -> claimDue(busy.isEmpty() ? Set.of(NO_ENDPOINT) : busy));
+        Set<String> excludedDeliveries = outstanding.isEmpty() ? NONE : Set.copyOf(outstanding);
+        List<Job> jobs = tx.execute(status -> claimDue(busyMerchants.isEmpty() ? NONE : busyMerchants,
+                excludedDeliveries, freeSenders));
         List<Future<?>> sends = new ArrayList<>();
         for (Job job : jobs) {
-            AtomicInteger inFlight = inFlightPerEndpoint.computeIfAbsent(job.endpointId(), id -> new AtomicInteger());
-            inFlight.incrementAndGet();
+            AtomicInteger perMerchant = outstandingPerMerchant.computeIfAbsent(job.merchantId(), id -> new AtomicInteger());
+            perMerchant.incrementAndGet();
+            outstanding.add(job.deliveryId());
+            Runnable finished = () -> {
+                outstanding.remove(job.deliveryId());
+                perMerchant.decrementAndGet();
+            };
             try {
                 sends.add(senders.submit(() -> {
                     try {
@@ -122,28 +138,32 @@ public class WebhookDispatcher {
                     } catch (RuntimeException e) {
                         log.error("Webhook delivery {} crashed", job.deliveryId(), e);
                     } finally {
-                        inFlight.decrementAndGet();
+                        finished.run();
                     }
                 }));
             } catch (RuntimeException e) {   // pool shut down
-                inFlight.decrementAndGet();
+                finished.run();
                 throw e;
             }
         }
         return sends;
     }
 
-    private List<Job> claimDue(Set<String> busyEndpoints) {
+    private List<Job> claimDue(Set<String> busyMerchants, Set<String> excludedDeliveries, int freeSenders) {
         Instant now = Instant.now();
+        // DNS check and request each have a deadline of one timeout; the lease covers both with room to spare.
         Instant leaseUntil = now.plus(settings.getTimeout().multipliedBy(3));
-        Map<String, Integer> claimedPerEndpoint = new HashMap<>();
+        Map<String, Integer> claimedPerMerchant = new HashMap<>();
         List<Job> jobs = new ArrayList<>();
-        for (WebhookDelivery delivery : deliveryRepository.findDue(DeliveryStatus.PENDING, now, busyEndpoints,
-                PageRequest.of(0, settings.getBatchSize()))) {
-            AtomicInteger inFlight = inFlightPerEndpoint.get(delivery.getEndpointId());
-            int claimed = claimedPerEndpoint.merge(delivery.getEndpointId(), 1, Integer::sum);
-            if ((inFlight == null ? 0 : inFlight.get()) + claimed > MAX_IN_FLIGHT_PER_ENDPOINT) {
-                continue;   // stays due; picked up once this endpoint has capacity again
+        for (WebhookDelivery delivery : deliveryRepository.findDue(DeliveryStatus.PENDING, now, busyMerchants,
+                excludedDeliveries, PageRequest.of(0, settings.getBatchSize()))) {
+            if (jobs.size() >= freeSenders) {
+                break;   // only claim what can start right away, so a lease never expires in a queue
+            }
+            AtomicInteger outstandingForMerchant = outstandingPerMerchant.get(delivery.getMerchantId());
+            int claimed = claimedPerMerchant.merge(delivery.getMerchantId(), 1, Integer::sum);
+            if ((outstandingForMerchant == null ? 0 : outstandingForMerchant.get()) + claimed > settings.getMaxInFlightPerMerchant()) {
+                continue;   // stays due; picked up once this merchant has capacity again
             }
             WebhookEndpoint endpoint = endpointRepository.findById(delivery.getEndpointId()).orElse(null);
             if (endpoint == null || !endpoint.isActive()) {
@@ -152,9 +172,8 @@ public class WebhookDispatcher {
                 continue;
             }
             delivery.setNextAttemptAt(leaseUntil);
-            jobs.add(new Job(delivery.getId(), endpoint.getId(), endpoint.getUrl(),
-                    secretCipher.decrypt(endpoint.getSecretEncrypted()), delivery.getEventId(), delivery.getEvent(),
-                    delivery.getPayload()));
+            jobs.add(new Job(delivery.getId(), delivery.getMerchantId(), endpoint.getUrl(), endpoint.getSecretEncrypted(),
+                    delivery.getEventId(), delivery.getEvent(), delivery.getPayload()));
         }
         return jobs;
     }
@@ -184,12 +203,19 @@ public class WebhookDispatcher {
 
     /** POSTs the signed payload; the response body is discarded and the whole exchange must finish within the timeout. */
     private int post(URI uri, Job job) {
+        String secret;
+        try {
+            // Decrypted per delivery: one unreadable secret only fails that endpoint's deliveries.
+            secret = secretCipher.decrypt(job.secretEncrypted());
+        } catch (RuntimeException e) {
+            throw new IllegalStateException("Webhook secret could not be decrypted; re-create the webhook endpoint");
+        }
         byte[] body = job.payload().getBytes(StandardCharsets.UTF_8);
         HttpRequest request = HttpRequest.newBuilder(uri)
                 .timeout(settings.getTimeout())
                 .header("Content-Type", "application/json")
                 .header("User-Agent", "AI-Payment-Gateway-Webhooks/1.0")
-                .header(SIGNATURE_HEADER, Signatures.hmacSha256Hex(body, job.secret()))
+                .header(SIGNATURE_HEADER, Signatures.hmacSha256Hex(body, secret))
                 .header(EVENT_ID_HEADER, job.eventId())
                 .header(EVENT_HEADER, job.event())
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body))

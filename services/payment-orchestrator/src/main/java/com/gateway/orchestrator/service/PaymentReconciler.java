@@ -90,9 +90,11 @@ public class PaymentReconciler {
             }
             BankResult enquiry = bankClient.enquire(attempt.getId());
             boolean answered = enquiry.outcome() == BankResult.Outcome.SUCCESS || enquiry.outcome() == BankResult.Outcome.DECLINED;
-            // "Not found" is only conclusive once the bank has had ample time to record the charge.
+            // The bank records a charge as soon as it receives it, so "not found" means the request never
+            // arrived. It is still only taken as final at the end of the reconciliation window, in case
+            // the bank's records lag (or, in the simulator, were lost in a restart).
             boolean neverProcessed = enquiry.outcome() == BankResult.Outcome.NOT_FOUND
-                    && attempt.getCreatedAt().isBefore(Instant.now().minus(PaymentService.IN_FLIGHT_WINDOW));
+                    && awaitingBank && Instant.now().isAfter(payment.getReconcileUntil());
             if (answered || neverProcessed) {
                 approved = tx.execute(status -> resolveAttempt(attempt.getId(), enquiry));
             } else {

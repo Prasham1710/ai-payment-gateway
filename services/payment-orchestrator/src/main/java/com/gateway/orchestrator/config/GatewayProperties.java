@@ -65,6 +65,8 @@ public class GatewayProperties {
          */
         private boolean allowPrivateNetwork = false;
         private int maxEndpointsPerMerchant = 10;
+        /** Deliveries one merchant may have queued or in flight, so no merchant can take every sender. */
+        private int maxInFlightPerMerchant = 2;
         /** Deliveries sent in parallel, so one slow receiver cannot hold up everyone else's events. */
         private int concurrency = 8;
         private int maxAttempts = 8;

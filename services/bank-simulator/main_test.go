@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 )
 
 func newTestServer() *SimulatorServer {
@@ -162,5 +163,38 @@ func TestConcurrentRetriesOfOneRefundPayOutOnce(t *testing.T) {
 	// A later retry replays the recorded result.
 	if rec := post(t, s.handleRefund, req); rec.Code != http.StatusOK {
 		t.Fatalf("replay: HTTP %d, want 200", rec.Code)
+	}
+}
+
+func TestStatusEnquiryReportsPendingWhileTheChargeIsProcessing(t *testing.T) {
+	s := newTestServer()
+	s.providers["provider-a"].LatencyMs = 200
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		post(t, s.handleCharge, ChargeRequest{TransactionID: "tx_p", ProviderID: "provider-a", Amount: 10, CustomerVPA: "success@gateway"})
+	}()
+
+	enquire := func() ChargeResponse {
+		rec := httptest.NewRecorder()
+		s.handleStatusEnquiry(rec, httptest.NewRequest(http.MethodGet, "/api/v1/bank/status?transaction_id=tx_p", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("HTTP %d, want 200", rec.Code)
+		}
+		return decode[ChargeResponse](t, rec)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := enquire().Status; got != "PENDING" {
+		t.Fatalf("status while processing = %s, want PENDING", got)
+	}
+	<-done
+	if got := enquire().Status; got != "SUCCESS" {
+		t.Fatalf("status after processing = %s, want SUCCESS", got)
+	}
+
+	rec := httptest.NewRecorder()
+	s.handleStatusEnquiry(rec, httptest.NewRequest(http.MethodGet, "/api/v1/bank/status?transaction_id=tx_never_sent", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown transaction: HTTP %d, want 404", rec.Code)
 	}
 }

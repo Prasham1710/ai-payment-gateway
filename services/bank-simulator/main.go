@@ -163,7 +163,16 @@ func (s *SimulatorServer) handleCharge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Simulate Latency
+	// 2. Record the charge as PENDING on receipt, so a status enquiry can tell "still processing"
+	// apart from "never received" (404), then simulate latency.
+	s.recordTx(req.TransactionID, ChargeResponse{
+		TransactionID: req.TransactionID,
+		ProviderID:    req.ProviderID,
+		Status:        "PENDING",
+		ResponseCode:  "09",
+		Message:       "Transaction is being processed",
+		Timestamp:     time.Now().Format(time.RFC3339),
+	})
 	sleepDuration := time.Duration(profile.LatencyMs) * time.Millisecond
 	time.Sleep(sleepDuration)
 

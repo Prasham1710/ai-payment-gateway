@@ -8,6 +8,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -46,9 +47,14 @@ abstract class IntegrationTestSupport {
     protected record Keys(String accountId, String keyId, String keySecret) {
     }
 
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
     @BeforeEach
     void resetBank() {
         BANK.reset();
+        // Every test starts with an empty webhook outbox, so deliveries queued by earlier tests are not sent.
+        jdbcTemplate.update("update webhook_deliveries set status = 'FAILED' where status = 'PENDING'");
     }
 
     protected Keys signup() {

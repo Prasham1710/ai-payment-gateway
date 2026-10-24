@@ -36,8 +36,9 @@ public interface PaymentRepository extends JpaRepository<Payment, String> {
      * Payments with an unknown bank outcome that are due for another check, plus payments whose
      * checkout request died mid-flight. Ordered by next check, so the batch rotates.
      */
-    @Query("select p.id from Payment p where (p.reconcileUntil is not null and p.reconcileAfter <= :now) "
-            + "or (p.status = :created and p.createdAt < :staleBefore) order by p.reconcileAfter, p.createdAt")
+    @Query("select p.id from Payment p where (p.reconcileUntil is not null "
+            + "and (p.reconcileAfter is null or p.reconcileAfter <= :now)) "
+            + "or (p.status = :created and p.createdAt < :staleBefore) order by coalesce(p.reconcileAfter, p.createdAt)")
     List<String> findIdsToReconcile(@Param("now") Instant now, @Param("created") PaymentStatus created,
                                     @Param("staleBefore") Instant staleBefore, Pageable pageable);
 
