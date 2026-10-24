@@ -2,9 +2,10 @@ package com.gateway.orchestrator.domain;
 
 import jakarta.persistence.*;
 import lombok.*;
-import java.math.BigDecimal;
-import java.time.LocalDateTime;
 
+import java.time.Instant;
+
+/** One call to one provider rail while routing a payment; a payment that failed over has several. */
 @Entity
 @Table(name = "transactions", indexes = {
     @Index(name = "idx_tx_payment", columnList = "payment_id"),
@@ -30,24 +31,28 @@ public class Transaction {
     @Column(name = "bank_reference", length = 64)
     private String bankReference;
 
-    @Column(nullable = false, precision = 12, scale = 2)
-    private BigDecimal amount;
+    /** In paise. */
+    @Column(nullable = false)
+    private long amount;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
-    private PaymentStatus status;
+    private AttemptStatus status;
 
     @Column(name = "response_code", length = 10)
     private String responseCode;
+
+    @Column(length = 255)
+    private String message;
 
     @Column(name = "latency_ms")
     private Integer latencyMs;
 
     @Column(name = "created_at", nullable = false, updatable = false)
-    private LocalDateTime createdAt;
+    private Instant createdAt;
 
     @PrePersist
     protected void onCreate() {
-        this.createdAt = LocalDateTime.now();
+        this.createdAt = Instant.now();
     }
 }

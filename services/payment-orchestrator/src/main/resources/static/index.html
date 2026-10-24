@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gateway Demo Store</title>
+  <style>
+    :root {
+      --brand: #2563eb;
+      --ink: #0f172a;
+      --muted: #64748b;
+      --line: #e2e8f0;
+      --soft: #f8fafc;
+      --ok: #16a34a;
+      --bad: #dc2626;
+      --warn-bg: #fffbeb;
+      --warn-line: #fde68a;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      color: var(--ink);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f1f5f9; }
+    .top { background: #fff; border-bottom: 1px solid var(--line); }
+    .top-inner { max-width: 1080px; margin: 0 auto; padding: 14px 16px; display: flex; align-items: center; gap: 10px; }
+    .logo { font-weight: 800; font-size: 18px; letter-spacing: -.01em; }
+    .pill { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: #fef3c7; color: #92400e; }
+    .top a { margin-left: auto; font-size: 13px; color: var(--brand); text-decoration: none; }
+    main { max-width: 1080px; margin: 0 auto; padding: 20px 16px 48px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+    @media (max-width: 860px) { main { grid-template-columns: minmax(0, 1fr); } }
+    .card { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 20px; }
+    h2 { font-size: 15px; margin: 0 0 4px; }
+    .sub { margin: 0 0 14px; font-size: 13px; color: var(--muted); line-height: 1.45; }
+    .product { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 18px; align-items: center; }
+    @media (max-width: 420px) { .product { grid-template-columns: minmax(0, 1fr); } }
+    .art {
+      aspect-ratio: 1; border-radius: 12px; display: grid; place-items: center; font-size: 52px;
+      background: linear-gradient(135deg, #dbeafe, #ede9fe);
+    }
+    .product h3 { margin: 0 0 4px; font-size: 18px; }
+    .price { font-size: 22px; font-weight: 800; margin: 8px 0 14px; }
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 11px 18px; border-radius: 10px;
+      border: 1px solid transparent; background: var(--brand); color: #fff; font: inherit; font-weight: 650; font-size: 14px; cursor: pointer;
+    }
+    .btn:disabled { opacity: .55; cursor: not-allowed; }
+    .btn.ghost { background: #fff; color: var(--ink); border-color: var(--line); }
+    .btn.small { padding: 7px 12px; font-size: 13px; }
+    label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin: 0 0 5px; }
+    input[type=text], input[type=password] {
+      width: 100%; padding: 9px 11px; border: 1px solid #cbd5e1; border-radius: 8px; font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .field { margin-bottom: 10px; }
+    .check { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 6px 0 0; color: var(--ink); font-weight: 500; }
+    .note { margin-top: 12px; padding: 10px 12px; border: 1px solid var(--warn-line); background: var(--warn-bg); border-radius: 8px; font-size: 12.5px; line-height: 1.45; color: #78350f; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .result { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 14px; }
+    dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 14px; margin: 0; font-size: 13px; }
+    dt { color: var(--muted); }
+    dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; overflow-wrap: anywhere; }
+    .ok { color: var(--ok); font-weight: 700; }
+    .bad { color: var(--bad); font-weight: 700; }
+    .log { list-style: none; margin: 0; padding: 0; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; max-height: 420px; overflow: auto; }
+    .log li { padding: 6px 0; border-bottom: 1px dashed var(--line); overflow-wrap: anywhere; }
+    .log .t { color: var(--muted); margin-right: 6px; }
+    .stack { display: grid; gap: 20px; align-content: start; }
+    .tests { font-size: 12.5px; color: var(--muted); line-height: 1.6; margin: 0; padding-left: 18px; }
+    code { background: var(--soft); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; font-size: 12px; color: var(--ink); }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+<div class="top">
+  <div class="top-inner">
+    <span class="logo">Demo Store</span>
+    <span class="pill">SANDBOX</span>
+    <a href="https://github.com/Prasham1710/ai-payment-gateway#readme">API docs &rarr;</a>
+  </div>
+</div>
+
+<main>
+  <div class="stack">
+    <section class="card">
+      <div class="product">
+        <div class="art" aria-hidden="true">&#127911;</div>
+        <div>
+          <h3>Noise-cancelling Headphones</h3>
+          <p class="sub" style="margin:0">40h battery &middot; USB-C &middot; 1 year warranty</p>
+          <div class="price">&#8377;2,499.00</div>
+          <button class="btn" id="buy" type="button">Buy now</button>
+          <label class="check"><input type="checkbox" id="auto-capture" checked> Capture payment automatically</label>
+        </div>
+      </div>
+
+      <div class="result" id="result" hidden>
+        <h2>Payment result</h2>
+        <dl>
+          <dt>Order</dt><dd id="r-order"></dd>
+          <dt>Payment</dt><dd id="r-payment"></dd>
+          <dt>Signature</dt><dd id="r-signature"></dd>
+          <dt>Verified</dt><dd id="r-verified"></dd>
+          <dt>Status</dt><dd id="r-status"></dd>
+          <dt>Routed via</dt><dd id="r-provider"></dd>
+          <dt>Fee (incl. GST)</dt><dd id="r-fee"></dd>
+        </dl>
+        <div class="actions">
+          <button class="btn small" id="capture" type="button" hidden>Capture payment</button>
+          <button class="btn small ghost" id="refund-half" type="button" hidden>Refund 50%</button>
+          <button class="btn small ghost" id="refund-full" type="button" hidden>Refund remaining</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Test instruments</h2>
+      <ul class="tests">
+        <li>UPI <code>success@gateway</code> succeeds, <code>failure@gateway</code> is declined</li>
+        <li>Card <code>4111 1111 1111 1111</code> succeeds, <code>4000 0000 0000 0002</code> is declined</li>
+        <li>Any other UPI ID, card or bank succeeds at the bank rail's configured success rate</li>
+        <li>Kill a rail to watch failover: <code>curl "localhost:8081/api/v1/chaos/kill?provider_id=provider-a"</code></li>
+      </ul>
+    </section>
+  </div>
+
+  <div class="stack">
+    <section class="card">
+      <h2>1. Test API keys</h2>
+      <p class="sub">Create a sandbox merchant, or paste the keys you got from <code>POST /v1/merchants</code>.</p>
+      <div class="field">
+        <label for="key-id">Key ID</label>
+        <input type="text" id="key-id" placeholder="key_test_..." autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="key-secret">Key secret</label>
+        <input type="password" id="key-secret" placeholder="24-character secret" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="actions">
+        <button class="btn small" id="signup" type="button">Create test merchant</button>
+      </div>
+      <p class="note">This page plays the role of <strong>your server</strong> (creating orders, verifying signatures, capturing and refunding) so the whole flow runs in one tab. In a real integration the key secret never leaves your backend; the browser only gets the key ID and order ID.</p>
+    </section>
+
+    <section class="card">
+      <h2>2. Activity</h2>
+      <p class="sub">API calls this page makes and checkout events, newest first.</p>
+      <ul class="log" id="log"></ul>
+    </section>
+  </div>
+</main>
+
+<script src="/checkout.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var PRICE_PAISE = 249900;
+  var $ = function (id) { return document.getElementById(id); };
+  var current = { orderId: null, paymentId: null };
+
+  // Sandbox convenience only: test keys are kept for this browser tab.
+  try {
+    $("key-id").value = sessionStorage.getItem("demo.keyId") || "";
+    $("key-secret").value = sessionStorage.getItem("demo.keySecret") || "";
+  } catch (e) { /* storage unavailable */ }
+
+  function remember() {
+    try {
+      sessionStorage.setItem("demo.keyId", $("key-id").value.trim());
+      sessionStorage.setItem("demo.keySecret", $("key-secret").value.trim());
+    } catch (e) { /* storage unavailable */ }
+  }
+
+  function log(text, kind) {
+    var item = document.createElement("li");
+    var time = document.createElement("span");
+    time.className = "t";
+    time.textContent = new Date().toLocaleTimeString();
+    var body = document.createElement("span");
+    if (kind) { body.className = kind; }
+    body.textContent = text;
+    item.appendChild(time);
+    item.appendChild(body);
+    $("log").insertBefore(item, $("log").firstChild);
+  }
+
+  function rupees(paise) {
+    return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" }).format(paise / 100);
+  }
+
+  function api(method, path, body) {
+    var headers = { "Content-Type": "application/json" };
+    var keyId = $("key-id").value.trim();
+    var secret = $("key-secret").value.trim();
+    if (keyId && secret) {
+      headers.Authorization = "Basic " + btoa(keyId + ":" + secret);
+    }
+    return fetch(path, { method: method, headers: headers, body: body ? JSON.stringify(body) : undefined })
+      .then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (data) {
+          var summary = method + " " + path + " → " + res.status;
+          if (!res.ok && data.error) { summary += " " + data.error.description; }
+          log(summary, res.ok ? "" : "bad");
+          if (!res.ok) {
+            var error = new Error((data.error && data.error.description) || ("HTTP " + res.status));
+            error.response = data;
+            throw error;
+          }
+          return data;
+        });
+      });
+  }
+
+  function verifySignature(orderId, paymentId, signature) {
+    var secret = $("key-secret").value.trim();
+    if (!window.crypto || !window.crypto.subtle) {
+      return Promise.resolve(null); // WebCrypto needs https or localhost
+    }
+    var encoder = new TextEncoder();
+    return crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
+      .then(function (key) { return crypto.subtle.sign("HMAC", key, encoder.encode(orderId + "|" + paymentId)); })
+      .then(function (mac) {
+        var hex = Array.prototype.map.call(new Uint8Array(mac), function (b) { return b.toString(16).padStart(2, "0"); }).join("");
+        return hex === signature;
+      });
+  }
+
+  function showPayment(payment) {
+    current.paymentId = payment.id;
+    $("r-payment").textContent = payment.id;
+    $("r-status").textContent = payment.status + (payment.refund_status ? " (refund: " + payment.refund_status + ", " + rupees(payment.amount_refunded) + ")" : "");
+    $("r-provider").textContent = payment.provider ? payment.provider + " (" + payment.attempts + " attempt" + (payment.attempts === 1 ? "" : "s") + ")" : "—";
+    $("r-fee").textContent = payment.fee != null ? rupees(payment.fee) + " (GST " + rupees(payment.tax) + ")" : "charged on capture";
+    $("capture").hidden = payment.status !== "authorized";
+    var refundable = payment.captured && payment.amount_refunded < payment.amount;
+    $("refund-half").hidden = !refundable || payment.amount_refunded > 0;
+    $("refund-full").hidden = !refundable;
+    $("result").hidden = false;
+  }
+
+  function refreshPayment() {
+    return api("GET", "/v1/payments/" + current.paymentId).then(showPayment);
+  }
+
+  $("signup").addEventListener("click", function () {
+    var email = "demo-" + Date.now().toString(36) + "@example.com";
+    api("POST", "/v1/merchants", { name: "Demo Store", email: email })
+      .then(function (merchant) {
+        $("key-id").value = merchant.key_id;
+        $("key-secret").value = merchant.key_secret;
+        remember();
+        log("Test merchant " + merchant.id + " created; keys filled in", "ok");
+      })
+      .catch(function () { /* already logged */ });
+  });
+  $("key-id").addEventListener("change", remember);
+  $("key-secret").addEventListener("change", remember);
+
+  $("buy").addEventListener("click", function () {
+    var keyId = $("key-id").value.trim();
+    if (!keyId || !$("key-secret").value.trim()) {
+      log("Add test API keys first (step 1)", "bad");
+      return;
+    }
+    remember();
+    $("buy").disabled = true;
+    api("POST", "/v1/orders", {
+      amount: PRICE_PAISE,
+      currency: "INR",
+      receipt: "demo_" + Date.now(),
+      notes: { product: "Noise-cancelling Headphones" },
+      payment_capture: $("auto-capture").checked
+    })
+      .then(function (order) {
+        current.orderId = order.id;
+        log("Opening checkout for " + order.id);
+        var checkout = new GatewayCheckout({
+          key: keyId,
+          order_id: order.id,
+          name: "Demo Store",
+          description: "Noise-cancelling Headphones",
+          prefill: { email: "ravi@example.com", contact: "9876543210", vpa: "success@gateway" },
+          theme: { color: "#2563eb" },
+          handler: function (response) {
+            log("Checkout returned " + response.payment_id, "ok");
+            $("r-order").textContent = response.order_id;
+            $("r-signature").textContent = response.signature;
+            current.paymentId = response.payment_id;
+            verifySignature(response.order_id, response.payment_id, response.signature).then(function (valid) {
+              var cell = $("r-verified");
+              cell.className = valid === false ? "bad" : (valid ? "ok" : "");
+              cell.textContent = valid === null ? "verify on your server (WebCrypto unavailable here)"
+                : (valid ? "✓ HMAC_SHA256(order_id|payment_id, key_secret) matches" : "✗ signature mismatch");
+            });
+            refreshPayment();
+          },
+          modal: { ondismiss: function () { log("Checkout closed by customer"); } }
+        });
+        checkout.on("payment.failed", function (response) {
+          log("payment.failed: " + response.error.description, "bad");
+        });
+        checkout.open();
+      })
+      .catch(function () { /* already logged */ })
+      .then(function () { $("buy").disabled = false; });
+  });
+
+  $("capture").addEventListener("click", function () {
+    api("POST", "/v1/payments/" + current.paymentId + "/capture", { amount: PRICE_PAISE, currency: "INR" })
+      .then(showPayment)
+      .catch(function () { /* already logged */ });
+  });
+
+  function refund(amount) {
+    api("POST", "/v1/payments/" + current.paymentId + "/refund", amount ? { amount: amount } : {})
+      .then(function (r) { log("Refund " + r.id + " " + r.status + " (" + rupees(r.amount) + ")", r.status === "failed" ? "bad" : "ok"); })
+      .then(refreshPayment)
+      .catch(function () { /* already logged */ });
+  }
+  $("refund-half").addEventListener("click", function () { refund(PRICE_PAISE / 2); });
+  $("refund-full").addEventListener("click", function () { refund(null); });
+})();
+</script>
+</body>
+</html>

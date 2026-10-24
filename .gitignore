@@ -1,0 +1,16 @@
+# Java / Maven build output
+target/
+*.class
+
+# Go build output
+services/bank-simulator/bank-simulator
+services/bank-simulator/*.exe
+
+# IDE / OS
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Local env files
+.env

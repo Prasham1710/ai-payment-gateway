@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -27,24 +28,55 @@ type ChargeRequest struct {
 	Currency      string  `json:"currency"`
 	PaymentMethod string  `json:"payment_method"` // UPI, CARD, NETBANKING
 	CustomerVPA   string  `json:"customer_vpa,omitempty"`
+	CardLast4     string  `json:"card_last4,omitempty"`
+	BankCode      string  `json:"bank_code,omitempty"`
 }
 
 type ChargeResponse struct {
-	TransactionID string  `json:"transaction_id"`
+	TransactionID string `json:"transaction_id"`
+	ProviderID    string `json:"provider_id"`
+	Status        string `json:"status"` // SUCCESS, FAILED, TIMEOUT
+	BankRef       string `json:"bank_reference"`
+	ResponseCode  string `json:"response_code"`
+	Message       string `json:"message"`
+	LatencyMs     int    `json:"latency_ms"`
+	Timestamp     string `json:"timestamp"`
+}
+
+type RefundRequest struct {
+	RefundID      string  `json:"refund_id"`
+	TransactionID string  `json:"transaction_id"` // the charge being refunded
 	ProviderID    string  `json:"provider_id"`
-	Status        string  `json:"status"` // SUCCESS, FAILED, TIMEOUT
-	BankRef       string  `json:"bank_reference"`
-	ResponseCode  string  `json:"response_code"`
-	Message       string  `json:"message"`
-	LatencyMs     int     `json:"latency_ms"`
-	Timestamp     string  `json:"timestamp"`
+	Amount        float64 `json:"amount"`
+	Currency      string  `json:"currency"`
+}
+
+type RefundResponse struct {
+	RefundID      string `json:"refund_id"`
+	TransactionID string `json:"transaction_id"`
+	ProviderID    string `json:"provider_id"`
+	Status        string `json:"status"`         // PROCESSED, FAILED
+	BankRef       string `json:"bank_reference"` // ARN (acquirer reference number)
+	ResponseCode  string `json:"response_code"`
+	Message       string `json:"message"`
+	Timestamp     string `json:"timestamp"`
 }
 
 type SimulatorServer struct {
-	mu        sync.RWMutex
-	providers map[string]*ProviderProfile
-	txLedger  map[string]ChargeResponse
+	mu           sync.RWMutex
+	providers    map[string]*ProviderProfile
+	txLedger     map[string]ChargeResponse
+	refundLedger map[string]RefundResponse
 }
+
+// Sandbox test instruments with a fixed outcome, regardless of the provider's success rate
+// (the kill switch still applies). Every other VPA/card succeeds with the provider's success rate.
+const (
+	TestVPASuccess       = "success@gateway"
+	TestVPAFailure       = "failure@gateway"
+	TestCardSuccessLast4 = "1111" // 4111 1111 1111 1111
+	TestCardFailureLast4 = "0002" // 4000 0000 0000 0002
+)
 
 func NewSimulatorServer() *SimulatorServer {
 	return &SimulatorServer{
@@ -53,7 +85,8 @@ func NewSimulatorServer() *SimulatorServer {
 			"provider-b": {ID: "provider-b", Name: "ICICI Payment Rail", SuccessRate: 0.92, LatencyMs: 180, IsKilled: false, Cost: 1.50},
 			"provider-c": {ID: "provider-c", Name: "SBI Gateway Rail", SuccessRate: 0.88, LatencyMs: 250, IsKilled: false, Cost: 1.00},
 		},
-		txLedger: make(map[string]ChargeResponse),
+		txLedger:     make(map[string]ChargeResponse),
+		refundLedger: make(map[string]RefundResponse),
 	}
 }
 
@@ -63,6 +96,7 @@ func main() {
 	// Business Endpoints
 	http.HandleFunc("/api/v1/bank/charge", server.handleCharge)
 	http.HandleFunc("/api/v1/bank/status", server.handleStatusEnquiry)
+	http.HandleFunc("/api/v1/bank/refund", server.handleRefund)
 
 	// Chaos Controls
 	http.HandleFunc("/api/v1/chaos/status", server.handleChaosStatus)
@@ -101,10 +135,7 @@ func (s *SimulatorServer) handleCharge(w http.ResponseWriter, r *http.Request) {
 		req.ProviderID = "provider-a"
 	}
 
-	s.mu.RLock()
-	profile, exists := s.providers[req.ProviderID]
-	s.mu.RUnlock()
-
+	profile, exists := s.providerSnapshot(req.ProviderID)
 	if !exists {
 		http.Error(w, "Unknown provider ID", http.StatusNotFound)
 		return
@@ -135,6 +166,9 @@ func (s *SimulatorServer) handleCharge(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Determine Success / Failure
 	isSuccess := rand.Float64() <= profile.SuccessRate
+	if forced, success := forcedOutcome(req); forced {
+		isSuccess = success
+	}
 	status := "SUCCESS"
 	respCode := "00"
 	msg := "Transaction Approved"
@@ -163,6 +197,88 @@ func (s *SimulatorServer) handleCharge(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(httpStatus)
 	json.NewEncoder(w).Encode(resp)
+}
+
+// forcedOutcome reports whether the request uses a sandbox test instrument and, if so, its outcome.
+func forcedOutcome(req ChargeRequest) (forced bool, success bool) {
+	switch {
+	case strings.EqualFold(req.CustomerVPA, TestVPASuccess), req.CardLast4 == TestCardSuccessLast4:
+		return true, true
+	case strings.EqualFold(req.CustomerVPA, TestVPAFailure), req.CardLast4 == TestCardFailureLast4:
+		return true, false
+	}
+	return false, false
+}
+
+// handleRefund refunds (part of) a successful charge. Idempotent per refund_id: a retry of a refund
+// that was already processed returns the original result instead of refunding twice.
+func (s *SimulatorServer) handleRefund(w http.ResponseWriter, r *http.Request) {
+	enableCORS(w)
+	if r.Method == "OPTIONS" {
+		return
+	}
+	if r.Method != "POST" {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"message": "Method not allowed"})
+		return
+	}
+
+	var req RefundRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RefundID == "" || req.Amount <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "refund_id and a positive amount are required"})
+		return
+	}
+
+	s.mu.RLock()
+	previous, replay := s.refundLedger[req.RefundID]
+	original, knownCharge := s.txLedger[req.TransactionID]
+	s.mu.RUnlock()
+	if replay {
+		writeJSON(w, refundHTTPStatus(previous), previous)
+		return
+	}
+
+	profile, exists := s.providerSnapshot(req.ProviderID)
+	if !exists {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "Unknown provider ID"})
+		return
+	}
+	// A killed rail does not record anything, so the gateway can safely retry the same refund later.
+	if profile.IsKilled {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"message": "Provider rail unavailable (Chaos Kill Switch Active)"})
+		return
+	}
+
+	time.Sleep(time.Duration(profile.LatencyMs) * time.Millisecond)
+
+	resp := RefundResponse{
+		RefundID:      req.RefundID,
+		TransactionID: req.TransactionID,
+		ProviderID:    req.ProviderID,
+		Status:        "PROCESSED",
+		BankRef:       fmt.Sprintf("ARN%d", rand.Int63n(9000000000)+1000000000),
+		ResponseCode:  "00",
+		Message:       "Refund processed",
+		Timestamp:     time.Now().Format(time.RFC3339),
+	}
+	// The ledger is in-memory, so charges from before a simulator restart are unknown and allowed.
+	if knownCharge && original.Status != "SUCCESS" {
+		resp.Status = "FAILED"
+		resp.BankRef = ""
+		resp.ResponseCode = "12"
+		resp.Message = "Original transaction was not successful"
+	}
+
+	s.mu.Lock()
+	s.refundLedger[req.RefundID] = resp
+	s.mu.Unlock()
+	writeJSON(w, refundHTTPStatus(resp), resp)
+}
+
+func refundHTTPStatus(resp RefundResponse) int {
+	if resp.Status == "PROCESSED" {
+		return http.StatusOK
+	}
+	return http.StatusUnprocessableEntity
 }
 
 func (s *SimulatorServer) handleStatusEnquiry(w http.ResponseWriter, r *http.Request) {
@@ -274,10 +390,27 @@ func (s *SimulatorServer) handleChaosSuccessRate(w http.ResponseWriter, r *http.
 	http.Error(w, "Provider not found", http.StatusNotFound)
 }
 
+// providerSnapshot copies the profile under the lock so request handling never races with chaos updates.
+func (s *SimulatorServer) providerSnapshot(providerID string) (ProviderProfile, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	profile, ok := s.providers[providerID]
+	if !ok {
+		return ProviderProfile{}, false
+	}
+	return *profile, true
+}
+
 func (s *SimulatorServer) recordTx(txID string, resp ChargeResponse) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.txLedger[txID] = resp
+}
+
+func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
 }
 
 func enableCORS(w http.ResponseWriter) {

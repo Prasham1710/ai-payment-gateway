@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Secure Checkout</title>
+  <style>
+    :root {
+      --brand: #2563eb;
+      --ink: #0f172a;
+      --muted: #64748b;
+      --line: #e2e8f0;
+      --soft: #f8fafc;
+      --danger: #dc2626;
+      --success: #16a34a;
+      --radius: 12px;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      color: var(--ink);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: transparent; }
+    .backdrop {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      background: rgba(15, 23, 42, .55); padding: 16px; animation: fade .15s ease-out;
+    }
+    .sheet {
+      width: 100%; max-width: 400px; max-height: 100%; overflow: auto; background: #fff;
+      border-radius: var(--radius); box-shadow: 0 24px 60px rgba(15, 23, 42, .35);
+      display: flex; flex-direction: column; animation: rise .2s ease-out;
+    }
+    @media (max-width: 480px) {
+      .backdrop { padding: 0; align-items: stretch; }
+      .sheet { max-width: none; border-radius: 0; }
+    }
+    @keyframes fade { from { opacity: 0; } }
+    @keyframes rise { from { transform: translateY(12px); opacity: 0; } }
+
+    header { display: flex; align-items: center; gap: 12px; padding: 18px 18px 14px; background: var(--brand); color: #fff; }
+    .badge {
+      flex: none; width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center;
+      background: rgba(255, 255, 255, .18); font-weight: 700; font-size: 18px;
+    }
+    .header-text { flex: 1; min-width: 0; }
+    h1 { margin: 0; font-size: 16px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .description { margin: 2px 0 0; font-size: 13px; opacity: .85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .close {
+      flex: none; width: 32px; height: 32px; border: 0; border-radius: 8px; cursor: pointer;
+      background: rgba(255, 255, 255, .15); color: #fff; font-size: 20px; line-height: 1;
+    }
+    .close:hover { background: rgba(255, 255, 255, .28); }
+    .amount {
+      display: flex; justify-content: space-between; align-items: baseline; padding: 12px 18px;
+      background: var(--soft); border-bottom: 1px solid var(--line); font-size: 13px; color: var(--muted);
+    }
+    .amount strong { font-size: 20px; color: var(--ink); }
+
+    .body { padding: 16px 18px 8px; flex: 1; }
+    .tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 14px; }
+    .tab {
+      padding: 9px 4px; border: 1px solid var(--line); border-radius: 8px; background: #fff; cursor: pointer;
+      font: inherit; font-size: 13px; font-weight: 600; color: var(--muted);
+    }
+    .tab[aria-selected="true"] { border-color: var(--brand); color: var(--brand); box-shadow: inset 0 0 0 1px var(--brand); }
+    fieldset { border: 0; padding: 0; margin: 0; }
+    label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin: 0 0 5px; }
+    input, select {
+      width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px; font: inherit; font-size: 15px;
+      color: var(--ink); background: #fff; outline: none;
+    }
+    input:focus, select:focus { border-color: var(--brand); box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 20%, transparent); }
+    .field { margin-bottom: 12px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .hint { margin: -4px 0 12px; font-size: 12px; color: var(--muted); }
+    .hint code { background: var(--soft); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; font-size: 11.5px; }
+    .banks { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+    .bank {
+      display: flex; align-items: center; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 8px;
+      font-size: 13px; cursor: pointer;
+    }
+    .bank input { width: auto; margin: 0; accent-color: var(--brand); }
+    .bank:has(input:checked) { border-color: var(--brand); background: color-mix(in srgb, var(--brand) 6%, #fff); }
+    .contact { border-top: 1px dashed var(--line); padding-top: 12px; margin-top: 4px; }
+    .error { margin: 4px 0 10px; color: var(--danger); font-size: 13px; }
+    .pay {
+      width: 100%; margin: 6px 0 4px; padding: 13px; border: 0; border-radius: 10px; cursor: pointer;
+      background: var(--brand); color: #fff; font: inherit; font-size: 15px; font-weight: 650;
+    }
+    .pay:hover { filter: brightness(1.06); }
+    .pay:disabled { opacity: .6; cursor: progress; }
+
+    .state { text-align: center; padding: 34px 22px 26px; }
+    .state h2 { margin: 14px 0 6px; font-size: 18px; }
+    .state p { margin: 0 0 6px; color: var(--muted); font-size: 14px; line-height: 1.45; }
+    .state .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; color: var(--ink); }
+    .icon { width: 56px; height: 56px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 28px; color: #fff; }
+    .icon.ok { background: var(--success); }
+    .icon.fail { background: var(--danger); }
+    .spinner {
+      width: 44px; height: 44px; border-radius: 50%; display: inline-block;
+      border: 4px solid var(--line); border-top-color: var(--brand); animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .secondary {
+      margin-top: 14px; padding: 10px 18px; border: 1px solid var(--line); border-radius: 8px; background: #fff;
+      font: inherit; font-weight: 600; cursor: pointer;
+    }
+
+    footer {
+      display: flex; justify-content: center; align-items: center; gap: 8px; padding: 10px 18px 14px;
+      font-size: 11.5px; color: var(--muted);
+    }
+    .test { padding: 1px 6px; border-radius: 4px; background: #fef3c7; color: #92400e; font-weight: 700; letter-spacing: .02em; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+<div class="backdrop" id="backdrop">
+  <main class="sheet" role="dialog" aria-modal="true" aria-labelledby="merchant-name">
+    <header>
+      <div class="badge" id="badge" aria-hidden="true">₹</div>
+      <div class="header-text">
+        <h1 id="merchant-name">Checkout</h1>
+        <p class="description" id="description"></p>
+      </div>
+      <button class="close" id="close" type="button" aria-label="Close checkout">&times;</button>
+    </header>
+    <div class="amount" id="amount-bar" hidden>
+      <span>Amount payable</span>
+      <strong id="amount"></strong>
+    </div>
+
+    <section class="state" id="view-loading">
+      <span class="spinner" aria-hidden="true"></span>
+      <p style="margin-top:14px">Loading secure checkout&hellip;</p>
+    </section>
+
+    <section class="body" id="view-form" hidden>
+      <div class="tabs" role="tablist" aria-label="Payment method">
+        <button class="tab" type="button" role="tab" data-method="upi" aria-selected="true">UPI</button>
+        <button class="tab" type="button" role="tab" data-method="card" aria-selected="false">Card</button>
+        <button class="tab" type="button" role="tab" data-method="netbanking" aria-selected="false">Netbanking</button>
+      </div>
+      <form id="pay-form" novalidate>
+        <fieldset data-panel="upi">
+          <div class="field">
+            <label for="vpa">UPI ID</label>
+            <input id="vpa" name="vpa" autocomplete="off" placeholder="yourname@bank" inputmode="email">
+          </div>
+          <p class="hint">Test: <code>success@gateway</code> always succeeds, <code>failure@gateway</code> is declined.</p>
+        </fieldset>
+
+        <fieldset data-panel="card" hidden>
+          <div class="field">
+            <label for="card-number">Card number</label>
+            <input id="card-number" autocomplete="cc-number" inputmode="numeric" placeholder="4111 1111 1111 1111" maxlength="23">
+          </div>
+          <div class="row">
+            <div class="field">
+              <label for="card-expiry">Expiry</label>
+              <input id="card-expiry" autocomplete="cc-exp" inputmode="numeric" placeholder="MM / YY" maxlength="7">
+            </div>
+            <div class="field">
+              <label for="card-cvv">CVV</label>
+              <input id="card-cvv" autocomplete="cc-csc" inputmode="numeric" placeholder="123" maxlength="4" type="password">
+            </div>
+          </div>
+          <div class="field">
+            <label for="card-name">Name on card</label>
+            <input id="card-name" autocomplete="cc-name" placeholder="Ravi Kumar">
+          </div>
+          <p class="hint">Test: <code>4111 1111 1111 1111</code> succeeds, <code>4000 0000 0000 0002</code> is declined. Any future expiry and CVV.</p>
+        </fieldset>
+
+        <fieldset data-panel="netbanking" hidden>
+          <div class="banks" id="banks">
+            <label class="bank"><input type="radio" name="bank" value="HDFC" checked> HDFC Bank</label>
+            <label class="bank"><input type="radio" name="bank" value="ICIC"> ICICI Bank</label>
+            <label class="bank"><input type="radio" name="bank" value="SBIN"> State Bank of India</label>
+            <label class="bank"><input type="radio" name="bank" value="UTIB"> Axis Bank</label>
+            <label class="bank"><input type="radio" name="bank" value="KKBK"> Kotak Mahindra</label>
+          </div>
+        </fieldset>
+
+        <div class="contact">
+          <div class="row">
+            <div class="field">
+              <label for="email">Email</label>
+              <input id="email" type="email" autocomplete="email" placeholder="you@example.com">
+            </div>
+            <div class="field">
+              <label for="contact">Phone</label>
+              <input id="contact" type="tel" autocomplete="tel" placeholder="9876543210">
+            </div>
+          </div>
+        </div>
+
+        <p class="error" id="form-error" role="alert" hidden></p>
+        <button class="pay" id="pay" type="submit">Pay</button>
+      </form>
+    </section>
+
+    <section class="state" id="view-processing" hidden aria-live="polite">
+      <span class="spinner" aria-hidden="true"></span>
+      <h2>Processing payment</h2>
+      <p>Routing through the best available bank rail. Please don't close this window.</p>
+    </section>
+
+    <section class="state" id="view-result" hidden aria-live="polite">
+      <span class="icon" id="result-icon" aria-hidden="true"></span>
+      <h2 id="result-title"></h2>
+      <p id="result-detail"></p>
+      <p class="mono" id="result-id"></p>
+      <button class="secondary" id="retry" type="button" hidden>Try again</button>
+    </section>
+
+    <footer>
+      <span>&#128274; Secured by AI Payment Gateway</span>
+      <span class="test">TEST MODE</span>
+    </footer>
+  </main>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var params = new URLSearchParams(window.location.search);
+  var keyId = params.get("key_id") || "";
+  var orderId = params.get("order_id") || "";
+  var parentOrigin = safeOrigin(params.get("origin"));
+  var MESSAGE_SOURCE = "gateway-checkout";
+
+  var state = { method: "upi", order: null, busy: false, done: false };
+  var $ = function (id) { return document.getElementById(id); };
+
+  var color = params.get("color") || "";
+  if (/^#[0-9a-fA-F]{3,8}$/.test(color)) {
+    document.documentElement.style.setProperty("--brand", color);
+  }
+  $("description").textContent = params.get("description") || "";
+  $("vpa").value = params.get("vpa") || "";
+  $("email").value = params.get("email") || "";
+  $("contact").value = params.get("contact") || "";
+  if (["upi", "card", "netbanking"].indexOf(params.get("method")) >= 0) {
+    selectMethod(params.get("method"));
+  }
+
+  function safeOrigin(value) {
+    try {
+      var url = new URL(value);
+      return url.protocol === "http:" || url.protocol === "https:" ? url.origin : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function post(type, payload) {
+    if (window.parent !== window && parentOrigin) {
+      window.parent.postMessage({ source: MESSAGE_SOURCE, type: type, payload: payload }, parentOrigin);
+    }
+  }
+
+  function show(view) {
+    ["view-loading", "view-form", "view-processing", "view-result"].forEach(function (id) {
+      $(id).hidden = id !== view;
+    });
+  }
+
+  function formatAmount(paise, currency) {
+    return new Intl.NumberFormat("en-IN", { style: "currency", currency: currency || "INR" }).format(paise / 100);
+  }
+
+  function showResult(ok, title, detail, id, canRetry) {
+    var icon = $("result-icon");
+    icon.className = "icon " + (ok ? "ok" : "fail");
+    icon.textContent = ok ? "✓" : "!";
+    $("result-title").textContent = title;
+    $("result-detail").textContent = detail || "";
+    $("result-id").textContent = id || "";
+    $("retry").hidden = !canRetry;
+    show("view-result");
+  }
+
+  function dismiss() {
+    if (state.busy || state.done) {
+      return;
+    }
+    post("dismiss", {});
+  }
+
+  function selectMethod(method) {
+    state.method = method;
+    document.querySelectorAll(".tab").forEach(function (tab) {
+      tab.setAttribute("aria-selected", String(tab.getAttribute("data-method") === method));
+    });
+    document.querySelectorAll("fieldset[data-panel]").forEach(function (panel) {
+      panel.hidden = panel.getAttribute("data-panel") !== method;
+    });
+    $("form-error").hidden = true;
+  }
+
+  function newIdempotencyKey() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return window.crypto.randomUUID();
+    }
+    return "co_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
+  }
+
+  function buildRequest() {
+    var body = { key_id: keyId, order_id: orderId, method: state.method };
+    var email = $("email").value.trim();
+    var contact = $("contact").value.trim();
+    if (email) { body.email = email; }
+    if (contact) { body.contact = contact; }
+
+    if (state.method === "upi") {
+      body.vpa = $("vpa").value.trim();
+      if (!body.vpa) { throw new Error("Enter your UPI ID."); }
+    } else if (state.method === "card") {
+      var expiry = $("card-expiry").value.replace(/\s/g, "").split("/");
+      body.card = {
+        number: $("card-number").value.replace(/\D/g, ""),
+        name: $("card-name").value.trim(),
+        expiry_month: parseInt(expiry[0], 10),
+        expiry_year: parseInt(expiry[1], 10),
+        cvv: $("card-cvv").value.trim()
+      };
+      if (!body.card.number) { throw new Error("Enter your card number."); }
+      if (!body.card.expiry_month || !body.card.expiry_year) { throw new Error("Enter the card expiry as MM / YY."); }
+    } else {
+      var checked = document.querySelector("input[name=bank]:checked");
+      body.bank = checked ? checked.value : "";
+    }
+    return body;
+  }
+
+  function loadOrder() {
+    if (!keyId || !orderId) {
+      showResult(false, "Checkout can't start", "Both key and order_id are required.", "", false);
+      return;
+    }
+    fetch("/v1/checkout/orders/" + encodeURIComponent(orderId) + "?key_id=" + encodeURIComponent(keyId))
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (result) {
+        if (!result.ok) {
+          var error = result.data && result.data.error;
+          showResult(false, "Checkout can't start", error ? error.description : "Invalid key or order.", "", false);
+          return;
+        }
+        var order = result.data;
+        state.order = order;
+        var name = params.get("name") || order.merchant_name;
+        $("merchant-name").textContent = name;
+        $("badge").textContent = (name || "₹").trim().charAt(0).toUpperCase();
+        $("amount").textContent = formatAmount(order.amount, order.currency);
+        $("amount-bar").hidden = false;
+        $("pay").textContent = "Pay " + formatAmount(order.amount, order.currency);
+        if (order.status === "paid") {
+          showResult(true, "Already paid", "This order has already been paid.", order.order_id, false);
+          state.done = true;
+          return;
+        }
+        show("view-form");
+      })
+      .catch(function () {
+        showResult(false, "Checkout can't start", "Could not reach the payment gateway. Check your connection.", "", false);
+      });
+  }
+
+  function submit(event) {
+    event.preventDefault();
+    if (state.busy) {
+      return;
+    }
+    var body;
+    try {
+      body = buildRequest();
+    } catch (e) {
+      $("form-error").textContent = e.message;
+      $("form-error").hidden = false;
+      return;
+    }
+    state.busy = true;
+    $("pay").disabled = true;
+    show("view-processing");
+
+    fetch("/v1/checkout/payments", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": newIdempotencyKey() },
+      body: JSON.stringify(body)
+    })
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (result) {
+        state.busy = false;
+        $("pay").disabled = false;
+        if (result.ok) {
+          state.done = true;
+          var payment = result.data;
+          showResult(true, "Payment successful", "Redirecting you back to the merchant…", payment.payment_id, false);
+          setTimeout(function () {
+            post("payment.success", { payment_id: payment.payment_id, order_id: payment.order_id, signature: payment.signature });
+          }, 1200);
+          return;
+        }
+        var error = (result.data && result.data.error) || { description: "Payment failed." };
+        // Input mistakes are shown on the form; real payment failures get the failure screen and an event.
+        if (error.reason === "input_validation_failed") {
+          show("view-form");
+          $("form-error").textContent = error.description;
+          $("form-error").hidden = false;
+          return;
+        }
+        post("payment.failed", { error: error });
+        var paymentId = error.metadata && error.metadata.payment_id;
+        showResult(false, "Payment failed", error.description, paymentId || "", true);
+      })
+      .catch(function () {
+        state.busy = false;
+        $("pay").disabled = false;
+        showResult(false, "Network error", "We could not confirm the payment. Check your connection before trying again.", "", true);
+      });
+  }
+
+  function formatCardNumber(event) {
+    var digits = event.target.value.replace(/\D/g, "").slice(0, 19);
+    event.target.value = digits.replace(/(\d{4})(?=\d)/g, "$1 ");
+  }
+
+  function formatExpiry(event) {
+    var digits = event.target.value.replace(/\D/g, "").slice(0, 4);
+    event.target.value = digits.length > 2 ? digits.slice(0, 2) + " / " + digits.slice(2) : digits;
+  }
+
+  document.querySelectorAll(".tab").forEach(function (tab) {
+    tab.addEventListener("click", function () { selectMethod(tab.getAttribute("data-method")); });
+  });
+  $("pay-form").addEventListener("submit", submit);
+  $("card-number").addEventListener("input", formatCardNumber);
+  $("card-expiry").addEventListener("input", formatExpiry);
+  $("close").addEventListener("click", dismiss);
+  $("retry").addEventListener("click", function () { show("view-form"); });
+  $("backdrop").addEventListener("click", function (event) {
+    if (event.target === $("backdrop")) { dismiss(); }
+  });
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") { dismiss(); }
+  });
+
+  loadOrder();
+})();
+</script>
+</body>
+</html>

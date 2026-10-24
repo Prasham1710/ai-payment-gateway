@@ -1,168 +1,94 @@
 package com.gateway.orchestrator.service;
 
-import com.gateway.orchestrator.domain.*;
-import com.gateway.orchestrator.dto.*;
-import com.gateway.orchestrator.repository.*;
+import com.gateway.orchestrator.config.GatewayProperties;
+import com.gateway.orchestrator.domain.AttemptStatus;
+import com.gateway.orchestrator.domain.Payment;
+import com.gateway.orchestrator.domain.Transaction;
+import com.gateway.orchestrator.dto.BankChargeRequest;
+import com.gateway.orchestrator.repository.TransactionRepository;
+import com.gateway.orchestrator.support.Ids;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.client.RestTemplate;
 
-import java.util.*;
+import java.math.BigDecimal;
 
+/**
+ * Routes a payment authorization across the provider rails (Provider A -> Provider B -> Provider C).
+ *
+ * <p>Fails over to the next rail only when the current one definitely did not process the charge
+ * (rail killed, 5xx, connection refused). A bank decline ends routing, because the customer's bank
+ * said no and retrying elsewhere would just charge them again. A timeout is first resolved with a
+ * status enquiry; if the outcome is still unknown, routing stops rather than risk a double charge.
+ */
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class PaymentOrchestratorService {
 
-    private final PaymentRepository paymentRepository;
+    private final BankSimulatorClient bankClient;
     private final TransactionRepository transactionRepository;
+    private final GatewayProperties properties;
 
-    @Value("${simulator.base-url:http://localhost:8081}")
-    private String simulatorBaseUrl;
+    public RoutingResult authorize(Payment payment) {
+        int attempts = 0;
+        for (String providerId : properties.getRouting().getProviders()) {
+            attempts++;
+            String txId = Ids.newId("tx");
+            log.info("Attempting payment {} via provider {} (attempt {})", payment.getId(), providerId, attempts);
 
-    private final RestTemplate restTemplate = new RestTemplate();
-
-    @Transactional
-    public PaymentResponse initiatePayment(PaymentRequest req) {
-        log.info("Processing payment request for merchant: {}, amount: {}", req.getMerchantId(), req.getAmount());
-
-        // 1. Idempotency Check
-        if (req.getIdempotencyKey() != null && !req.getIdempotencyKey().isBlank()) {
-            Optional<Payment> existing = paymentRepository.findByIdempotencyKey(req.getIdempotencyKey());
-            if (existing.isPresent()) {
-                log.info("Duplicate request detected for idempotency key: {}", req.getIdempotencyKey());
-                return mapToResponse(existing.get());
-            }
-        }
-
-        // 2. Create Payment in INITIATED state
-        String paymentId = "pay_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
-        Payment payment = Payment.builder()
-                .id(paymentId)
-                .merchantId(req.getMerchantId())
-                .amount(req.getAmount())
-                .currency(req.getCurrency() != null ? req.getCurrency() : "INR")
-                .paymentMethod(req.getPaymentMethod() != null ? req.getPaymentMethod() : "UPI")
-                .idempotencyKey(req.getIdempotencyKey())
-                .status(PaymentStatus.INITIATED)
-                .build();
-
-        payment = paymentRepository.save(payment);
-
-        // 3. Transition to ROUTING
-        payment.setStatus(PaymentStatus.ROUTING);
-        payment = paymentRepository.save(payment);
-
-        // 4. Provider Routing & Failover Chain (Provider A -> Provider B -> Provider C)
-        List<String> providerChain = List.of("provider-a", "provider-b", "provider-c");
-        boolean isSuccess = false;
-
-        for (String providerId : providerChain) {
-            log.info("Attempting payment {} via provider {}", paymentId, providerId);
-            String txId = "tx_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
-
-            BankChargeRequest bankReq = BankChargeRequest.builder()
-                    .transaction_id(txId)
-                    .provider_id(providerId)
-                    .amount(req.getAmount())
+            BankResult result = bankClient.charge(BankChargeRequest.builder()
+                    .transactionId(txId)
+                    .providerId(providerId)
+                    .amount(BigDecimal.valueOf(payment.getAmount(), 2))
                     .currency(payment.getCurrency())
-                    .payment_method(payment.getPaymentMethod())
-                    .customer_vpa(req.getCustomerVpa())
-                    .build();
+                    .paymentMethod(payment.getMethod().name())
+                    .customerVpa(payment.getVpa())
+                    .cardLast4(payment.getCardLast4())
+                    .bankCode(payment.getBank())
+                    .build());
 
-            try {
-                long startTime = System.currentTimeMillis();
-                ResponseEntity<BankChargeResponse> bankRespEntity = restTemplate.postForEntity(
-                        simulatorBaseUrl + "/api/v1/bank/charge",
-                        bankReq,
-                        BankChargeResponse.class
-                );
-                int latency = (int) (System.currentTimeMillis() - startTime);
-
-                BankChargeResponse bankResp = bankRespEntity.getBody();
-
-                // Log Transaction attempt
-                Transaction tx = Transaction.builder()
-                        .id(txId)
-                        .paymentId(paymentId)
-                        .providerId(providerId)
-                        .amount(req.getAmount())
-                        .bankReference(bankResp != null ? bankResp.getBank_reference() : null)
-                        .responseCode(bankResp != null ? bankResp.getResponse_code() : "500")
-                        .latencyMs(latency)
-                        .status("SUCCESS".equalsIgnoreCase(bankResp != null ? bankResp.getStatus() : "") ? PaymentStatus.SUCCESS : PaymentStatus.FAILED)
-                        .build();
-
-                transactionRepository.save(tx);
-
-                if (bankResp != null && "SUCCESS".equalsIgnoreCase(bankResp.getStatus())) {
-                    payment.setStatus(PaymentStatus.SUCCESS);
-                    payment.setSelectedProvider(providerId);
-                    payment.setBankReference(bankResp.getBank_reference());
-                    payment.setFailureReason(null);
-                    payment = paymentRepository.save(payment);
-                    isSuccess = true;
-                    log.info("Payment {} SUCCESS via {}", paymentId, providerId);
-                    break;
-                } else {
-                    log.warn("Payment {} FAILED on provider {}. Trying next route.", paymentId, providerId);
+            if (result.outcome() == BankResult.Outcome.TIMEOUT) {
+                BankResult enquiry = bankClient.enquire(txId);
+                log.warn("Payment {} timed out on {}; status enquiry says {}", payment.getId(), providerId, enquiry.outcome());
+                if (enquiry.outcome() == BankResult.Outcome.SUCCESS || enquiry.outcome() == BankResult.Outcome.DECLINED) {
+                    result = new BankResult(enquiry.outcome(), enquiry.body(), result.latencyMs(), null);
                 }
+            }
+            recordAttempt(payment, txId, providerId, result);
 
-            } catch (Exception e) {
-                log.error("Exception calling provider {}: {}", providerId, e.getMessage());
-                // Save failed transaction attempt
-                Transaction tx = Transaction.builder()
-                        .id(txId)
-                        .paymentId(paymentId)
-                        .providerId(providerId)
-                        .amount(req.getAmount())
-                        .status(PaymentStatus.FAILED)
-                        .responseCode("503")
-                        .latencyMs(0)
-                        .build();
-                transactionRepository.save(tx);
+            switch (result.outcome()) {
+                case SUCCESS -> {
+                    log.info("Payment {} authorized via {}", payment.getId(), providerId);
+                    return RoutingResult.authorized(providerId, txId, result.bankReference(), attempts);
+                }
+                case DECLINED -> {
+                    log.info("Payment {} declined by bank on {}: {}", payment.getId(), providerId, result.message());
+                    return RoutingResult.declined(providerId, result.responseCode(), result.message(), attempts);
+                }
+                case TIMEOUT -> {
+                    return RoutingResult.timedOut(providerId, attempts);
+                }
+                case UNAVAILABLE -> log.warn("Provider {} unavailable for payment {}. Failing over.", providerId, payment.getId());
             }
         }
-
-        if (!isSuccess) {
-            payment.setStatus(PaymentStatus.FAILED);
-            payment.setFailureReason("All available payment providers/rails failed or timed out.");
-            payment = paymentRepository.save(payment);
-            log.error("Payment {} FAILED on all provider rails.", paymentId);
-        }
-
-        return mapToResponse(payment);
+        log.error("Payment {} failed: all provider rails unavailable", payment.getId());
+        return RoutingResult.allRailsUnavailable(attempts);
     }
 
-    public PaymentResponse getPaymentById(String paymentId) {
-        Payment payment = paymentRepository.findById(paymentId)
-                .orElseThrow(() -> new RuntimeException("Payment not found with id: " + paymentId));
-        return mapToResponse(payment);
-    }
-
-    public List<PaymentResponse> getPaymentsByMerchant(String merchantId) {
-        return paymentRepository.findByMerchantIdOrderByCreatedAtDesc(merchantId).stream()
-                .map(this::mapToResponse)
-                .toList();
-    }
-
-    private PaymentResponse mapToResponse(Payment p) {
-        return PaymentResponse.builder()
-                .id(p.getId())
-                .merchantId(p.getMerchantId())
-                .amount(p.getAmount())
-                .currency(p.getCurrency())
-                .status(p.getStatus())
-                .paymentMethod(p.getPaymentMethod())
-                .selectedProvider(p.getSelectedProvider())
-                .bankReference(p.getBankReference())
-                .failureReason(p.getFailureReason())
-                .createdAt(p.getCreatedAt())
-                .updatedAt(p.getUpdatedAt())
-                .build();
+    private void recordAttempt(Payment payment, String txId, String providerId, BankResult result) {
+        AttemptStatus status = AttemptStatus.valueOf(result.outcome().name());
+        String message = result.message();
+        transactionRepository.save(Transaction.builder()
+                .id(txId)
+                .paymentId(payment.getId())
+                .providerId(providerId)
+                .amount(payment.getAmount())
+                .status(status)
+                .bankReference(status == AttemptStatus.SUCCESS ? result.bankReference() : null)
+                .responseCode(result.responseCode())
+                .message(message != null && message.length() > 255 ? message.substring(0, 255) : message)
+                .latencyMs(result.latencyMs())
+                .build());
     }
 }

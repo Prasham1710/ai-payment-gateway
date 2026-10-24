@@ -10,6 +10,7 @@ spring:
     password: postgrespassword
     driver-class-name: org.postgresql.Driver
   jpa:
+    open-in-view: false
     hibernate:
       ddl-auto: update
     show-sql: false
@@ -20,9 +21,37 @@ spring:
     redis:
       host: localhost
       port: 6380
+  jackson:
+    # Razorpay-style JSON: snake_case keys, and amounts must be whole paise (50000, not 500.00).
+    property-naming-strategy: SNAKE_CASE
+    deserialization:
+      accept-float-as-int: false
 
 simulator:
   base-url: http://localhost:8081
+
+gateway:
+  security:
+    # AES-256 key that encrypts merchant key secrets and webhook secrets at rest.
+    # The default is for local development only: set GATEWAY_MASTER_KEY anywhere else.
+    master-key: ${GATEWAY_MASTER_KEY:ABXzoRfk/Wu6JLptFXXY0DBJDl30zzsnjMHnGd5DRCs=}
+  routing:
+    providers: provider-a,provider-b,provider-c
+    connect-timeout: 2s
+    read-timeout: 8s
+  pricing:
+    fee-percent: 2.00
+    gst-percent: 18.00
+  webhooks:
+    poll-interval-ms: 2000
+    max-attempts: 8
+    base-backoff: 5s
+    max-backoff: 1h
+    timeout: 5s
+  refunds:
+    poll-interval-ms: 5000
+    max-attempts: 10
+    retry-backoff: 30s
 
 resilience4j:
   circuitbreaker:
