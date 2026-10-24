@@ -275,7 +275,7 @@ class GatewayApiIntegrationTest extends IntegrationTestSupport {
         assertThat(webhook.has("secret")).isFalse();
 
         String paymentId = capturedPayment(keys, 10000);
-        webhookDispatcher.dispatchDue();
+        awaitAll(webhookDispatcher.dispatchDue());
 
         assertThat(BANK.webhooks()).hasSize(2);
         for (FakeBankServer.ReceivedWebhook received : BANK.webhooks()) {
@@ -299,14 +299,14 @@ class GatewayApiIntegrationTest extends IntegrationTestSupport {
         BANK.reset();
         BANK.setWebhookStatus(500);
         capturedPayment(keys, 10000);
-        webhookDispatcher.dispatchDue();
+        awaitAll(webhookDispatcher.dispatchDue());
         JsonNode failing = as(keys).getForObject("/v1/webhooks/" + webhookId + "/deliveries?count=2", JsonNode.class);
         assertThat(failing.at("/items/0/status").asText()).isEqualTo("pending");
         assertThat(failing.at("/items/0/attempts").asInt()).isEqualTo(1);
         assertThat(failing.at("/items/0/last_response_code").asInt()).isEqualTo(500);
 
         BANK.setWebhookStatus(200);
-        webhookDispatcher.dispatchDue();
+        awaitAll(webhookDispatcher.dispatchDue());
         JsonNode recovered = as(keys).getForObject("/v1/webhooks/" + webhookId + "/deliveries?count=2", JsonNode.class);
         assertThat(recovered.at("/items/0/status").asText()).isEqualTo("delivered");
         assertThat(recovered.at("/items/0/attempts").asInt()).isEqualTo(2);

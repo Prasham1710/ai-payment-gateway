@@ -22,7 +22,11 @@ public interface RefundRepository extends JpaRepository<Refund, String> {
 
     List<Refund> findByPaymentIdOrderByCreatedAtAsc(String paymentId);
 
-    boolean existsByPaymentId(String paymentId);
+    /** A refund in progress or done, or one that failed after {@code failedAfter}. */
+    @Query("select count(r) > 0 from Refund r where r.paymentId = :paymentId "
+            + "and (r.status <> :failed or r.createdAt > :failedAfter)")
+    boolean existsBlockingRefund(@Param("paymentId") String paymentId, @Param("failed") RefundStatus failed,
+                                 @Param("failedAfter") Instant failedAfter);
 
     List<Refund> findByMerchantIdAndCreatedAtBetween(String merchantId, Instant from, Instant to, Pageable pageable);
 

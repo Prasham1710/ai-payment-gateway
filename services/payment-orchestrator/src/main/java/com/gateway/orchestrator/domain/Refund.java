@@ -60,7 +60,7 @@ public class Refund {
     private int attempts;
 
     /** Set once any attempt got no usable answer: the bank may have processed it, so it is never failed on a guess. */
-    @Column(name = "outcome_unknown", nullable = false)
+    @Column(name = "outcome_unknown", nullable = false, columnDefinition = "boolean default false not null")
     private boolean outcomeUnknown;
 
     @Column(name = "next_attempt_at")

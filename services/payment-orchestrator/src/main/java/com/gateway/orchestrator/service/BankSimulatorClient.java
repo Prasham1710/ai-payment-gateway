@@ -48,19 +48,19 @@ public class BankSimulatorClient {
     }
 
     public BankResult charge(BankChargeRequest request) {
-        return call(() -> restTemplate.postForEntity(baseUrl + "/api/v1/bank/charge", request, String.class));
+        return call(() -> restTemplate.postForEntity(baseUrl + "/api/v1/bank/charge", request, String.class), false);
     }
 
     public BankResult enquire(String transactionId) {
         return call(() -> restTemplate.getForEntity(baseUrl + "/api/v1/bank/status?transaction_id={id}",
-                String.class, transactionId));
+                String.class, transactionId), true);
     }
 
     public BankResult refund(BankRefundRequest request) {
-        return call(() -> restTemplate.postForEntity(baseUrl + "/api/v1/bank/refund", request, String.class));
+        return call(() -> restTemplate.postForEntity(baseUrl + "/api/v1/bank/refund", request, String.class), false);
     }
 
-    private BankResult call(Supplier<ResponseEntity<String>> request) {
+    private BankResult call(Supplier<ResponseEntity<String>> request, boolean enquiry) {
         long start = System.nanoTime();
         ResponseEntity<String> response;
         try {
@@ -85,6 +85,9 @@ public class BankSimulatorClient {
         BankResponse body = parse(response.getBody());
         String bankStatus = body == null || body.getStatus() == null ? null : body.getStatus().toUpperCase(Locale.ROOT);
 
+        if (enquiry && status == 404) {
+            return new BankResult(BankResult.Outcome.NOT_FOUND, body, latency, "Transaction not found at the bank");
+        }
         if (status == SERVICE_UNAVAILABLE) {
             return new BankResult(BankResult.Outcome.UNAVAILABLE, body, latency, "HTTP 503");
         }

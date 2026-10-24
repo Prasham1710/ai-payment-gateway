@@ -60,6 +60,7 @@ public class FakeBankServer implements AutoCloseable {
         server.createContext("/api/v1/bank/status", this::status);
         server.createContext("/api/v1/bank/refund", this::refund);
         server.createContext("/hooks", this::webhook);
+        server.createContext("/hooks/slow", this::slowWebhook);
         server.start();
     }
 
@@ -94,6 +95,15 @@ public class FakeBankServer implements AutoCloseable {
 
     public boolean hasCharge(String transactionId) {
         return charges.containsKey(transactionId);
+    }
+
+    /** Records a charge as if the bank processed it while the gateway was not listening (e.g. it crashed). */
+    public void recordCharge(String transactionId, boolean approved) {
+        charges.put(transactionId, approved
+                ? Map.of("transaction_id", transactionId, "status", "SUCCESS", "bank_reference", "BANKREF_" + transactionId,
+                        "response_code", "00", "message", "Transaction Approved")
+                : Map.of("transaction_id", transactionId, "status", "FAILED", "response_code", "51",
+                        "message", "Declined by issuing bank (Insufficient funds)"));
     }
 
     public void setRefundMode(RefundMode mode) {
@@ -185,6 +195,14 @@ public class FakeBankServer implements AutoCloseable {
                 exchange.getRequestHeaders().getFirst("X-Gateway-Event-Id"),
                 exchange.getRequestHeaders().getFirst("X-Gateway-Event")));
         exchange.sendResponseHeaders(webhookStatus, -1);
+        exchange.close();
+    }
+
+    /** A receiver that takes far longer than the gateway's webhook timeout. */
+    private void slowWebhook(HttpExchange exchange) throws IOException {
+        exchange.getRequestBody().readAllBytes();
+        sleep(3000);
+        exchange.sendResponseHeaders(200, -1);
         exchange.close();
     }
 

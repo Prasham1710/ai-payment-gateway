@@ -12,13 +12,16 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
 @Repository
 public interface WebhookDeliveryRepository extends JpaRepository<WebhookDelivery, String> {
-    @Query("select d.id from WebhookDelivery d where d.status = :status and d.nextAttemptAt <= :now order by d.nextAttemptAt")
-    List<String> findDueIds(@Param("status") DeliveryStatus status, @Param("now") Instant now, Pageable pageable);
+    @Query("select d from WebhookDelivery d where d.status = :status and d.nextAttemptAt <= :now "
+            + "and d.endpointId not in :excludedEndpoints order by d.nextAttemptAt")
+    List<WebhookDelivery> findDue(@Param("status") DeliveryStatus status, @Param("now") Instant now,
+                                  @Param("excludedEndpoints") Collection<String> excludedEndpoints, Pageable pageable);
 
     List<WebhookDelivery> findByEndpointIdOrderByCreatedAtDesc(String endpointId, Pageable pageable);
 

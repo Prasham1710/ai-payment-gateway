@@ -12,7 +12,9 @@ public record BankResult(Outcome outcome, BankResponse body, int latencyMs, Stri
         /** The rail definitely did not process the request (503, connection refused, request rejected). */
         UNAVAILABLE,
         /** No usable answer; the request may or may not have been processed. */
-        UNKNOWN
+        UNKNOWN,
+        /** Status enquiry only: the bank has no record of the transaction (yet). */
+        NOT_FOUND
     }
 
     public String responseCode() {

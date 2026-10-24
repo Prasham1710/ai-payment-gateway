@@ -12,6 +12,7 @@ import com.gateway.orchestrator.repository.PaymentRepository;
 import com.gateway.orchestrator.repository.TransactionRepository;
 import com.gateway.orchestrator.service.PaymentReconciler;
 import com.gateway.orchestrator.service.RefundService;
+import com.gateway.orchestrator.service.WebhookDispatcher;
 import com.gateway.orchestrator.support.Ids;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -27,6 +28,7 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -44,6 +46,8 @@ class ReliabilityIntegrationTest extends IntegrationTestSupport {
     private TransactionRepository transactionRepository;
     @Autowired
     private JdbcTemplate jdbc;
+    @Autowired
+    private WebhookDispatcher webhookDispatcher;
 
     @Test
     void ambiguousBankErrorIsNotFailedOverAndIsReconciledIntoALateCapture() {
@@ -282,6 +286,140 @@ class ReliabilityIntegrationTest extends IntegrationTestSupport {
         ResponseEntity<JsonNode> eleventh = as(keys).postForEntity("/v1/webhooks", Map.of("url", BANK.baseUrl() + "/hooks/x",
                 "secret", "whsec_test_123", "events", List.of("*")), JsonNode.class);
         assertThat(eleventh.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    @Test
+    void chargeInFlightDuringACrashIsFoundThroughItsWriteAheadAttempt() {
+        Keys keys = signup();
+        String orderId = createOrder(keys, Map.of("amount", 9900)).get("id").asText();
+        // The attempt row was written before the charge was sent; the process died before the answer.
+        String paymentId = abandonedPayment(keys, orderId, AttemptStatus.UNKNOWN);
+        BANK.recordCharge(attemptOf(paymentId).getId(), true);
+
+        reconciler.reconcileDue();
+
+        assertThat(payment(keys, paymentId).get("status").asText()).isEqualTo("captured");
+        assertThat(attemptOf(paymentId).getStatus()).isEqualTo(AttemptStatus.SUCCESS);
+    }
+
+    @Test
+    void attemptTheBankNeverReceivedIsSettledAsNotProcessed() {
+        Keys keys = signup();
+        String orderId = createOrder(keys, Map.of("amount", 9900)).get("id").asText();
+        // Crashed after writing the attempt but before sending it: the bank has no record of it.
+        String paymentId = abandonedPayment(keys, orderId, AttemptStatus.UNKNOWN);
+        jdbc.update("update transactions set created_at = ? where payment_id = ?",
+                Timestamp.from(Instant.now().minus(Duration.ofMinutes(5))), paymentId);
+
+        reconciler.reconcile(paymentId);
+        assertThat(payment(keys, paymentId).get("status").asText()).isEqualTo("failed");
+        assertThat(attemptOf(paymentId).getStatus()).isEqualTo(AttemptStatus.UNAVAILABLE);
+
+        reconciler.reconcile(paymentId);
+        assertThat(paymentRepository.findById(paymentId).orElseThrow().getReconcileUntil())
+                .as("nothing left to ask the bank about").isNull();
+    }
+
+    @Test
+    void abandonedCheckoutDeclinedByTheBankKeepsTheDeclineReason() {
+        Keys keys = signup();
+        String orderId = createOrder(keys, Map.of("amount", 9900)).get("id").asText();
+        String paymentId = abandonedPayment(keys, orderId, AttemptStatus.UNKNOWN);
+        BANK.recordCharge(attemptOf(paymentId).getId(), false);
+
+        reconciler.reconcile(paymentId);
+
+        JsonNode failed = payment(keys, paymentId);
+        assertThat(failed.get("status").asText()).isEqualTo("failed");
+        assertThat(failed.get("error_reason").asText()).isEqualTo("insufficient_funds");
+        assertThat(failed.get("error_source").asText()).isEqualTo("bank");
+    }
+
+    @Test
+    void inconclusiveChecksArePushedBackSoTheBatchRotates() {
+        Keys keys = signup();
+        BANK.setMode("provider-a", Mode.GATEWAY_ERROR);
+        String orderId = createOrder(keys, Map.of("amount", 9900)).get("id").asText();
+        String paymentId = pay(keys, orderId, Map.of("method", "upi", "vpa", "ravi@okaxis"))
+                .getBody().at("/error/metadata/payment_id").asText();
+        Instant firstCheck = paymentRepository.findById(paymentId).orElseThrow().getReconcileAfter();
+        assertThat(firstCheck).isAfter(Instant.now());
+
+        jdbc.update("update payments set reconcile_after = ? where id = ?", Timestamp.from(Instant.now().minusSeconds(1)), paymentId);
+        reconciler.reconcileDue();
+
+        Payment after = paymentRepository.findById(paymentId).orElseThrow();
+        assertThat(after.getStatus()).isEqualTo(PaymentStatus.FAILED);
+        assertThat(after.getReconcileUntil()).isNotNull();
+        assertThat(after.getReconcileAfter()).as("next check scheduled in the future").isAfter(Instant.now());
+    }
+
+    @Test
+    void failedAutomaticRefundIsRetriedAfterTheBackOff() {
+        Keys keys = signup();
+        String orderId = createOrder(keys, Map.of("amount", 25000, "payment_capture", false)).get("id").asText();
+        String first = pay(keys, orderId, Map.of("method", "upi", "vpa", "success@gateway")).getBody().get("payment_id").asText();
+        String second = pay(keys, orderId, Map.of("method", "upi", "vpa", "success@gateway")).getBody().get("payment_id").asText();
+        as(keys).postForEntity("/v1/payments/" + second + "/capture", Map.of("amount", 25000, "currency", "INR"), JsonNode.class);
+
+        BANK.setRefundMode(RefundMode.DOWN);
+        refundService.refundUncapturableAuthorizations();             // attempt 1: rail down
+        String refundId = as(keys).getForObject("/v1/payments/" + first + "/refunds", JsonNode.class).at("/items/0/id").asText();
+        refundService.attempt(refundId);                              // attempt 2 (max): failed, amount released
+        assertThat(payment(keys, first).get("status").asText()).isEqualTo("authorized");
+
+        refundService.refundUncapturableAuthorizations();
+        assertThat(as(keys).getForObject("/v1/payments/" + first + "/refunds", JsonNode.class).get("count").asInt())
+                .as("not retried before the back-off").isEqualTo(1);
+
+        BANK.setRefundMode(RefundMode.PROCESS);
+        jdbc.update("update refunds set created_at = ? where id = ?", Timestamp.from(Instant.now().minus(Duration.ofHours(2))), refundId);
+        refundService.refundUncapturableAuthorizations();
+        assertThat(payment(keys, first).get("status").asText()).isEqualTo("refunded");
+    }
+
+    @Test
+    void slowWebhookReceiverDoesNotHoldUpOtherMerchants() {
+        Keys slowMerchant = signup();
+        Keys normalMerchant = signup();
+        String slowHook = as(slowMerchant).postForObject("/v1/webhooks", Map.of("url", BANK.baseUrl() + "/hooks/slow",
+                "secret", "whsec_test_123", "events", List.of("payment.captured")), JsonNode.class).get("id").asText();
+        String normalHook = as(normalMerchant).postForObject("/v1/webhooks", Map.of("url", BANK.baseUrl() + "/hooks",
+                "secret", "whsec_test_123", "events", List.of("payment.captured")), JsonNode.class).get("id").asText();
+        for (int i = 0; i < 3; i++) {
+            capturedPayment(slowMerchant, 10000);
+        }
+        capturedPayment(normalMerchant, 10000);
+
+        long start = System.nanoTime();
+        List<Future<?>> sends = webhookDispatcher.dispatchDue();
+        assertThat(Duration.ofNanos(System.nanoTime() - start)).as("the poll does not wait for receivers").isLessThan(Duration.ofMillis(500));
+        assertThat(sends).as("at most 2 in flight per endpoint, plus the normal one").hasSize(3);
+
+        await().atMost(Duration.ofMillis(800)).until(() -> "delivered".equals(
+                as(normalMerchant).getForObject("/v1/webhooks/" + normalHook + "/deliveries", JsonNode.class).at("/items/0/status").asText()));
+        awaitAll(sends);
+        JsonNode slow = as(slowMerchant).getForObject("/v1/webhooks/" + slowHook + "/deliveries", JsonNode.class);
+        List<String> errors = new java.util.ArrayList<>();
+        slow.get("items").forEach(item -> errors.add(item.get("attempts").asInt() + ":" + item.get("last_error").asText()));
+        // Two were sent and timed out; the third waited for the endpoint to have capacity.
+        assertThat(errors).containsExactlyInAnyOrder("1:Receiver did not respond within 1000 ms",
+                "1:Receiver did not respond within 1000 ms", "0:null");
+    }
+
+    @Test
+    void absurdCardExpiryYearIsA400NotA500() {
+        Keys keys = signup();
+        String orderId = createOrder(keys, Map.of("amount", 10000)).get("id").asText();
+        Map<String, Object> card = new HashMap<>(card("4111111111111111"));
+        card.put("expiry_year", -1999999999);
+        ResponseEntity<JsonNode> response = pay(keys, orderId, Map.of("method", "card", "card", card));
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody().at("/error/field").asText()).isEqualTo("card.expiry_year");
+    }
+
+    private Transaction attemptOf(String paymentId) {
+        return transactionRepository.findByPaymentIdOrderByCreatedAtAsc(paymentId).get(0);
     }
 
     /** Persists a payment as a crashed checkout would have left it: {@code created}, older than the in-flight window. */

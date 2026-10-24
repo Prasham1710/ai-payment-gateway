@@ -51,6 +51,8 @@ gateway:
     # Authorized payments that are not captured within this window are refunded automatically.
     capture-window: 5d
     auto-refund-poll-interval-ms: 30000
+    # After an automatic refund fails (e.g. the rail stayed down), try again after this long.
+    auto-refund-retry-interval: 1h
   reconciliation:
     # Payments whose bank outcome is unknown are re-checked with the bank for this long.
     window: 24h

@@ -22,6 +22,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -53,29 +54,34 @@ public class WebhookService {
     private final WebhookUrlGuard urlGuard;
     private final GatewayProperties properties;
     private final ObjectMapper objectMapper;
+    private final TransactionTemplate tx;
 
-    @Transactional
+    /**
+     * Not one transaction on purpose: the URL check resolves DNS, which can be slow, and must not
+     * hold a database connection meanwhile. Cheap checks (including the endpoint cap) run first.
+     */
     public WebhookResponse create(Merchant merchant, WebhookCreateRequest req) {
         URI uri = validateUrl(req.getUrl());
-        String blocked = urlGuard.rejectionReason(uri);
-        if (blocked != null) {
-            throw GatewayException.badRequest("The url is not allowed: " + blocked + ".", "url");
-        }
         if (req.getSecret() == null || req.getSecret().length() < MIN_SECRET_LENGTH || req.getSecret().length() > MAX_SECRET_LENGTH) {
             throw GatewayException.badRequest("The secret must be " + MIN_SECRET_LENGTH + " to " + MAX_SECRET_LENGTH + " characters.", "secret");
         }
+        String events = String.join(",", validateEvents(req.getEvents()));
         int maxEndpoints = properties.getWebhooks().getMaxEndpointsPerMerchant();
         if (endpointRepository.countByMerchantId(merchant.getId()) >= maxEndpoints) {
             throw GatewayException.badRequest("A merchant can have at most " + maxEndpoints + " webhook endpoints.", "url");
         }
-        WebhookEndpoint endpoint = endpointRepository.save(WebhookEndpoint.builder()
+        String blocked = urlGuard.rejectionReason(uri);
+        if (blocked != null) {
+            throw GatewayException.badRequest("The url is not allowed: " + blocked + ".", "url");
+        }
+        WebhookEndpoint endpoint = tx.execute(status -> endpointRepository.save(WebhookEndpoint.builder()
                 .id(Ids.newId("wh"))
                 .merchantId(merchant.getId())
                 .url(uri.toString())
                 .secretEncrypted(secretCipher.encrypt(req.getSecret()))
-                .events(String.join(",", validateEvents(req.getEvents())))
+                .events(events)
                 .active(true)
-                .build());
+                .build()));
         return EntityMapper.toResponse(endpoint);
     }
 

@@ -121,7 +121,9 @@ public class PaymentService {
         payment.setErrorStep(result.errorStep());
         payment.setErrorReason(result.errorReason());
         if (result.needsReconciliation()) {
-            payment.setReconcileUntil(Instant.now().plus(properties.getReconciliation().getWindow()));
+            Instant now = Instant.now();
+            payment.setReconcileUntil(now.plus(properties.getReconciliation().getWindow()));
+            payment.setReconcileAfter(nextReconcileCheck(payment, now));
         }
         webhookService.publish(payment.getMerchantId(), WebhookService.PAYMENT_FAILED, entities(payment, null));
         log.info("Payment {} failed: {}", payment.getId(), result.errorReason());
@@ -152,13 +154,34 @@ public class PaymentService {
         if (payment.getStatus() != PaymentStatus.FAILED || payment.getReconcileUntil() == null) {
             return;
         }
+        Instant now = Instant.now();
         if (!outcomeStillUnknown) {
-            payment.setReconcileUntil(null);
-            log.info("Payment {} confirmed as failed by the bank", payment.getId());
-        } else if (Instant.now().isAfter(payment.getReconcileUntil())) {
-            payment.setReconcileUntil(null);
+            // Every attempt is written before it is sent, so no unresolved attempt means no charge is outstanding.
+            stopReconciling(payment);
+            log.info("Payment {}: every bank attempt is resolved and none succeeded", payment.getId());
+        } else if (now.isAfter(payment.getReconcileUntil())) {
+            stopReconciling(payment);
             log.error("Payment {}: the bank never confirmed the outcome; manual reconciliation required", payment.getId());
+        } else {
+            payment.setReconcileAfter(nextReconcileCheck(payment, now));
         }
+    }
+
+    /** Checks young payments often and older ones less: a quarter of the payment's age, between 15 seconds and an hour. */
+    private static Instant nextReconcileCheck(Payment payment, Instant now) {
+        Duration age = Duration.between(payment.getCreatedAt(), now);
+        Duration delay = age.dividedBy(4);
+        if (delay.compareTo(Duration.ofSeconds(15)) < 0) {
+            delay = Duration.ofSeconds(15);
+        } else if (delay.compareTo(Duration.ofHours(1)) > 0) {
+            delay = Duration.ofHours(1);
+        }
+        return now.plus(delay);
+    }
+
+    private static void stopReconciling(Payment payment) {
+        payment.setReconcileUntil(null);
+        payment.setReconcileAfter(null);
     }
 
     @Transactional
@@ -199,7 +222,7 @@ public class PaymentService {
         payment.setErrorSource(null);
         payment.setErrorStep(null);
         payment.setErrorReason(null);
-        payment.setReconcileUntil(null);
+        stopReconciling(payment);
         webhookService.publish(payment.getMerchantId(), WebhookService.PAYMENT_AUTHORIZED, entities(payment, null));
 
         // An authorization on an order that another payment already paid stays authorized; the

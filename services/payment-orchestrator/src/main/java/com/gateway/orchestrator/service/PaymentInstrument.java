@@ -66,7 +66,7 @@ public record PaymentInstrument(PaymentMethod method, String vpa, String bank, S
             throw GatewayException.badRequest("The card expiry date is invalid.", "card.expiry_month");
         }
         int fullYear = year < 100 ? 2000 + year : year;
-        if (fullYear > YearMonth.now().getYear() + 50) {
+        if (year < 0 || fullYear > YearMonth.now().getYear() + 50) {
             throw GatewayException.badRequest("The card expiry date is invalid.", "card.expiry_year");
         }
         if (YearMonth.of(fullYear, month).isBefore(YearMonth.now())) {

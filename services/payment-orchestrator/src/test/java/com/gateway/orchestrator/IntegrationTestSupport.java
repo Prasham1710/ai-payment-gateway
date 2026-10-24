@@ -15,8 +15,11 @@ import org.springframework.test.context.DynamicPropertySource;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -82,6 +85,20 @@ abstract class IntegrationTestSupport {
 
     protected JsonNode payment(Keys keys, String paymentId) {
         return as(keys).getForObject("/v1/payments/" + paymentId, JsonNode.class);
+    }
+
+    /** Waits for webhook sends started by {@code WebhookDispatcher.dispatchDue()}. */
+    protected static void awaitAll(List<Future<?>> sends) {
+        for (Future<?> send : sends) {
+            try {
+                send.get();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            } catch (ExecutionException e) {
+                throw new IllegalStateException(e);
+            }
+        }
     }
 
     protected static Map<String, Object> card(String number) {

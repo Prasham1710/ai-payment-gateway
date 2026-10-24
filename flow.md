@@ -33,9 +33,10 @@ On top of the orchestrator sits a **Razorpay-style merchant platform**: merchant
        │                                  │ POST /v1/checkout/payments ───────►│ 1. lock order, idempotency check   │
        │                                  │    (UPI / card / netbanking)       │ 2. payment: created, order: attempted
        │                                  │                                    │ 3. smart routing ─────────────────►│ provider-a
-       │                                  │                                    │      rail down (5xx)? ─ fail over ►│ provider-b ...
+       │                                  │                                    │      rail down (503)? ─ fail over ►│ provider-b ...
        │                                  │                                    │      decline? ─ stop (no retry)    │
-       │                                  │                                    │      timeout? ─ status enquiry     │
+       │                                  │                                    │      timeout/502? ─ enquiry, else  │
+       │                                  │                                    │        failed + reconciler         │
        │                                  │                                    │ 4. payment: authorized             │
        │                                  │                                    │    auto-capture → captured,        │
        │                                  │                                    │    fee + GST, order: paid          │

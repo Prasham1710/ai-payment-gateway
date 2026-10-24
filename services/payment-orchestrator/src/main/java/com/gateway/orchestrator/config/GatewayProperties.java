@@ -45,6 +45,8 @@ public class GatewayProperties {
     public static class Payments {
         /** Authorized payments not captured within this window are refunded automatically. */
         private Duration captureWindow = Duration.ofDays(5);
+        /** Wait this long after an automatic refund failed before trying again. */
+        private Duration autoRefundRetryInterval = Duration.ofHours(1);
         private int batchSize = 50;
     }
 

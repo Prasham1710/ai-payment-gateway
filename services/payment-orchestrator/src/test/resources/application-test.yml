@@ -19,6 +19,7 @@ gateway:
     read-timeout: 600ms
   webhooks:
     base-backoff: 0s
+    timeout: 1s
     # The test webhook receiver runs on 127.0.0.1; the guard itself is unit tested.
     allow-private-network: true
   refunds:

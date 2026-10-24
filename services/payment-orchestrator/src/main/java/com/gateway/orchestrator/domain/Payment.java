@@ -10,7 +10,7 @@ import java.time.Instant;
     @Index(name = "idx_payment_merchant_created", columnList = "merchant_id, created_at"),
     @Index(name = "idx_payment_order", columnList = "order_id"),
     @Index(name = "idx_payment_status_created", columnList = "status, created_at"),
-    @Index(name = "idx_payment_reconcile", columnList = "reconcile_until"),
+    @Index(name = "idx_payment_reconcile", columnList = "reconcile_after"),
     @Index(name = "idx_payment_idempotency", columnList = "merchant_id, idempotency_key", unique = true)
 })
 @Getter
@@ -126,6 +126,10 @@ public class Payment {
      */
     @Column(name = "reconcile_until")
     private Instant reconcileUntil;
+
+    /** Next time the reconciler looks at this payment; pushed back after every inconclusive check. */
+    @Column(name = "reconcile_after")
+    private Instant reconcileAfter;
 
     @PrePersist
     protected void onCreate() {

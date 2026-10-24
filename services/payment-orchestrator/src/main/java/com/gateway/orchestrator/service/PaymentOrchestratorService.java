@@ -37,7 +37,16 @@ public class PaymentOrchestratorService {
         int attempts = 0;
         for (String providerId : properties.getRouting().getProviders()) {
             attempts++;
-            String txId = Ids.newId("tx");
+            // Write-ahead: the attempt is committed as UNKNOWN before the charge is sent, so a crash or a
+            // failed write while the bank is processing it still leaves a transaction id to reconcile.
+            Transaction attempt = transactionRepository.save(Transaction.builder()
+                    .id(Ids.newId("tx"))
+                    .paymentId(payment.getId())
+                    .providerId(providerId)
+                    .amount(payment.getAmount())
+                    .status(AttemptStatus.UNKNOWN)
+                    .build());
+            String txId = attempt.getId();
             log.info("Attempting payment {} via provider {} (attempt {})", payment.getId(), providerId, attempts);
 
             BankResult result = bankClient.charge(BankChargeRequest.builder()
@@ -58,7 +67,7 @@ public class PaymentOrchestratorService {
                     result = new BankResult(enquiry.outcome(), enquiry.body(), result.latencyMs(), null);
                 }
             }
-            recordAttempt(payment, txId, providerId, result);
+            recordOutcome(attempt, result);
 
             switch (result.outcome()) {
                 case SUCCESS -> {
@@ -79,18 +88,14 @@ public class PaymentOrchestratorService {
         return RoutingResult.allRailsUnavailable(attempts);
     }
 
-    private void recordAttempt(Payment payment, String txId, String providerId, BankResult result) {
-        AttemptStatus status = AttemptStatus.valueOf(result.outcome().name());
-        transactionRepository.save(Transaction.builder()
-                .id(txId)
-                .paymentId(payment.getId())
-                .providerId(providerId)
-                .amount(payment.getAmount())
-                .status(status)
-                .bankReference(status == AttemptStatus.SUCCESS ? Text.truncate(result.bankReference(), 64) : null)
-                .responseCode(Text.truncate(result.responseCode(), 10))
-                .message(Text.truncate(result.message(), 255))
-                .latencyMs(result.latencyMs())
-                .build());
+    private void recordOutcome(Transaction attempt, BankResult result) {
+        AttemptStatus status = result.outcome() == BankResult.Outcome.NOT_FOUND
+                ? AttemptStatus.UNKNOWN : AttemptStatus.valueOf(result.outcome().name());
+        attempt.setStatus(status);
+        attempt.setBankReference(status == AttemptStatus.SUCCESS ? Text.truncate(result.bankReference(), 64) : null);
+        attempt.setResponseCode(Text.truncate(result.responseCode(), 10));
+        attempt.setMessage(Text.truncate(result.message(), 255));
+        attempt.setLatencyMs(result.latencyMs());
+        transactionRepository.save(attempt);
     }
 }

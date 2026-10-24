@@ -3,6 +3,7 @@ package com.gateway.orchestrator.repository;
 import com.gateway.orchestrator.domain.OrderStatus;
 import com.gateway.orchestrator.domain.Payment;
 import com.gateway.orchestrator.domain.PaymentStatus;
+import com.gateway.orchestrator.domain.RefundStatus;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -31,19 +32,27 @@ public interface PaymentRepository extends JpaRepository<Payment, String> {
     @Query("select p from Payment p where p.id = :id")
     Optional<Payment> findByIdForUpdate(@Param("id") String id);
 
-    /** Payments with an unknown bank outcome, plus payments whose checkout request died mid-flight. */
-    @Query("select p.id from Payment p where p.reconcileUntil is not null "
-            + "or (p.status = :created and p.createdAt < :staleBefore) order by p.createdAt")
-    List<String> findIdsToReconcile(@Param("created") PaymentStatus created, @Param("staleBefore") Instant staleBefore,
-                                    Pageable pageable);
+    /**
+     * Payments with an unknown bank outcome that are due for another check, plus payments whose
+     * checkout request died mid-flight. Ordered by next check, so the batch rotates.
+     */
+    @Query("select p.id from Payment p where (p.reconcileUntil is not null and p.reconcileAfter <= :now) "
+            + "or (p.status = :created and p.createdAt < :staleBefore) order by p.reconcileAfter, p.createdAt")
+    List<String> findIdsToReconcile(@Param("now") Instant now, @Param("created") PaymentStatus created,
+                                    @Param("staleBefore") Instant staleBefore, Pageable pageable);
 
     /**
      * Authorized payments that will never be captured: their order was paid by another payment, or
-     * the capture window has passed. Payments that already have a refund are left alone.
+     * the capture window has passed. Skips payments with a refund in progress or done, and payments
+     * whose last refund failed recently (retried after a back-off).
      */
     @Query("select p.id from Payment p, PaymentOrder o where o.id = p.orderId and p.status = :authorized "
             + "and (o.status = :paid or p.createdAt < :capturedBefore) "
-            + "and not exists (select r.id from Refund r where r.paymentId = p.id) order by p.createdAt")
+            + "and not exists (select r.id from Refund r where r.paymentId = p.id "
+            + "and (r.status <> :failed or r.createdAt > :failedRefundRetryBefore)) order by p.createdAt")
     List<String> findUncapturableAuthorizations(@Param("authorized") PaymentStatus authorized, @Param("paid") OrderStatus paid,
-                                                @Param("capturedBefore") Instant capturedBefore, Pageable pageable);
+                                                @Param("capturedBefore") Instant capturedBefore,
+                                                @Param("failed") RefundStatus failed,
+                                                @Param("failedRefundRetryBefore") Instant failedRefundRetryBefore,
+                                                Pageable pageable);
 }

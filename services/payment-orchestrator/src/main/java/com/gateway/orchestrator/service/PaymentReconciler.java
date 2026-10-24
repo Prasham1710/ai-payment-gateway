@@ -53,8 +53,9 @@ public class PaymentReconciler {
 
     @Scheduled(fixedDelayString = "${gateway.reconciliation.poll-interval-ms:30000}")
     public void reconcileDue() {
-        Instant staleBefore = Instant.now().minus(PaymentService.IN_FLIGHT_WINDOW);
-        List<String> due = tx.execute(status -> paymentRepository.findIdsToReconcile(PaymentStatus.CREATED, staleBefore,
+        Instant now = Instant.now();
+        Instant staleBefore = now.minus(PaymentService.IN_FLIGHT_WINDOW);
+        List<String> due = tx.execute(status -> paymentRepository.findIdsToReconcile(now, PaymentStatus.CREATED, staleBefore,
                 PageRequest.of(0, properties.getReconciliation().getBatchSize())));
         for (String paymentId : due) {
             try {
@@ -88,7 +89,11 @@ public class PaymentReconciler {
                 continue;
             }
             BankResult enquiry = bankClient.enquire(attempt.getId());
-            if (enquiry.outcome() == BankResult.Outcome.SUCCESS || enquiry.outcome() == BankResult.Outcome.DECLINED) {
+            boolean answered = enquiry.outcome() == BankResult.Outcome.SUCCESS || enquiry.outcome() == BankResult.Outcome.DECLINED;
+            // "Not found" is only conclusive once the bank has had ample time to record the charge.
+            boolean neverProcessed = enquiry.outcome() == BankResult.Outcome.NOT_FOUND
+                    && attempt.getCreatedAt().isBefore(Instant.now().minus(PaymentService.IN_FLIGHT_WINDOW));
+            if (answered || neverProcessed) {
                 approved = tx.execute(status -> resolveAttempt(attempt.getId(), enquiry));
             } else {
                 stillUnknown = true;
@@ -98,7 +103,8 @@ public class PaymentReconciler {
         if (approved != null) {
             paymentService.authorizeLate(paymentId, approved.getProviderId(), approved.getId(), approved.getBankReference());
         } else if (abandoned) {
-            paymentService.completeAuthorization(paymentId, failureFor(attempts, stillUnknown));
+            List<Transaction> resolved = tx.execute(status -> transactionRepository.findByPaymentIdOrderByCreatedAtAsc(paymentId));
+            paymentService.completeAuthorization(paymentId, failureFor(resolved, stillUnknown));
         } else {
             paymentService.updateReconciliation(paymentId, stillUnknown);
         }
@@ -111,7 +117,11 @@ public class PaymentReconciler {
             return attempt.getStatus() == AttemptStatus.SUCCESS ? attempt : null;
         }
         boolean success = enquiry.outcome() == BankResult.Outcome.SUCCESS;
-        attempt.setStatus(success ? AttemptStatus.SUCCESS : AttemptStatus.DECLINED);
+        attempt.setStatus(switch (enquiry.outcome()) {
+            case SUCCESS -> AttemptStatus.SUCCESS;
+            case DECLINED -> AttemptStatus.DECLINED;
+            default -> AttemptStatus.UNAVAILABLE;   // the bank never received it
+        });
         attempt.setResponseCode(Text.truncate(enquiry.responseCode(), 10));
         attempt.setMessage(Text.truncate(enquiry.message(), 255));
         if (success) {

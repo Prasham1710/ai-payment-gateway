@@ -110,12 +110,15 @@ public class RefundService {
     /** Refunds authorized payments that can no longer be captured, so the customer's money is not held indefinitely. */
     @Scheduled(fixedDelayString = "${gateway.payments.auto-refund-poll-interval-ms:30000}")
     public void refundUncapturableAuthorizations() {
-        Instant capturedBefore = Instant.now().minus(properties.getPayments().getCaptureWindow());
+        Instant now = Instant.now();
+        Instant capturedBefore = now.minus(properties.getPayments().getCaptureWindow());
+        Instant failedRefundRetryBefore = now.minus(properties.getPayments().getAutoRefundRetryInterval());
         List<String> paymentIds = tx.execute(status -> paymentRepository.findUncapturableAuthorizations(
-                PaymentStatus.AUTHORIZED, OrderStatus.PAID, capturedBefore, PageRequest.of(0, properties.getPayments().getBatchSize())));
+                PaymentStatus.AUTHORIZED, OrderStatus.PAID, capturedBefore, RefundStatus.FAILED, failedRefundRetryBefore,
+                PageRequest.of(0, properties.getPayments().getBatchSize())));
         for (String paymentId : paymentIds) {
             try {
-                String refundId = tx.execute(status -> reserveAutomaticRefund(paymentId, capturedBefore));
+                String refundId = tx.execute(status -> reserveAutomaticRefund(paymentId, capturedBefore, failedRefundRetryBefore));
                 if (refundId != null) {
                     attempt(refundId);
                 }
@@ -189,9 +192,10 @@ public class RefundService {
         return new RefundStart(refund.getId(), false);
     }
 
-    private String reserveAutomaticRefund(String paymentId, Instant capturedBefore) {
+    private String reserveAutomaticRefund(String paymentId, Instant capturedBefore, Instant failedRefundRetryBefore) {
         Payment payment = paymentRepository.findByIdForUpdate(paymentId).orElseThrow();
-        if (payment.getStatus() != PaymentStatus.AUTHORIZED || refundRepository.existsByPaymentId(paymentId)) {
+        if (payment.getStatus() != PaymentStatus.AUTHORIZED
+                || refundRepository.existsBlockingRefund(paymentId, RefundStatus.FAILED, failedRefundRetryBefore)) {
             return null;
         }
         boolean orderPaid = orderRepository.findById(payment.getOrderId())
