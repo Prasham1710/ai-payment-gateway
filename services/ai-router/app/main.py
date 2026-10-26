@@ -17,6 +17,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
 from app.bandit import DiscountedThompsonBandit
@@ -75,7 +76,8 @@ class FeedbackRequest(BaseModel):
 
 
 def create_app(model_path: str | None = None, discount: float | None = None, half_life: float | None = None,
-               model_weight: float | None = None, timezone: str | None = None, seed: int | None = None) -> FastAPI:
+               model_weight: float | None = None, timezone: str | None = None, seed: int | None = None,
+               cors_origins: list[str] | None = None) -> FastAPI:
     model_path = model_path if model_path is not None else os.getenv("AI_ROUTER_MODEL_PATH", "models/routing-model.joblib")
     discount = discount if discount is not None else float(os.getenv("AI_ROUTER_DISCOUNT", "0.98"))
     half_life = half_life if half_life is not None else float(os.getenv("AI_ROUTER_HALF_LIFE_SECONDS", "120"))
@@ -84,7 +86,15 @@ def create_app(model_path: str | None = None, discount: float | None = None, hal
 
     bandit = DiscountedThompsonBandit(discount=discount, half_life=half_life, rng=random.Random(seed))
     model = SuccessModel(model_path)
+    if cors_origins is None:
+        cors_origins = [o.strip() for o in os.getenv("AI_ROUTER_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+                        if o.strip()]
+
     app = FastAPI(title="AI Router", version="1.0.0")
+    if cors_origins:
+        # The operations dashboard (services/frontend) reads /health and /v1/stats and uses /v1/route as a playground.
+        app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_methods=["GET", "POST"],
+                           allow_headers=["Content-Type"])
     app.state.bandit = bandit
     app.state.model = model
 

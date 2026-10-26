@@ -65,3 +65,12 @@ def test_trained_model_is_blended_in_and_can_be_reloaded(tmp_path):
     assert body["providers"][0] == "provider-b"
     assert body["expected_success"]["provider-b"] > 0.9
     assert c.get("/health").json()["model_version"] == body["model_version"]
+
+
+def test_dashboard_origin_is_allowed_and_others_are_not(tmp_path):
+    client = TestClient(create_app(model_path=str(tmp_path / "none.joblib"), seed=1, cors_origins=["http://localhost:3000"]))
+    allowed = client.options("/v1/stats", headers={"Origin": "http://localhost:3000", "Access-Control-Request-Method": "GET"})
+    assert allowed.status_code == 200
+    assert allowed.headers["access-control-allow-origin"] == "http://localhost:3000"
+    denied = client.options("/v1/stats", headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "GET"})
+    assert "access-control-allow-origin" not in denied.headers
