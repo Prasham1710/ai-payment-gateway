@@ -314,6 +314,9 @@ func (s *SimulatorServer) handleStatusEnquiry(w http.ResponseWriter, r *http.Req
 
 	txID := r.URL.Query().Get("transaction_id")
 	if txID == "" {
+		txID = r.URL.Query().Get("tx_id") // older clients (the operations dashboard) use this name
+	}
+	if txID == "" {
 		http.Error(w, "Missing transaction_id query param", http.StatusBadRequest)
 		return
 	}
@@ -361,6 +364,16 @@ func (s *SimulatorServer) handleChaosRestore(w http.ResponseWriter, r *http.Requ
 	pID := r.URL.Query().Get("provider_id")
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// No provider_id (or "all") brings every rail back, as the operations dashboard's "Restore all" expects.
+	if pID == "" || pID == "all" {
+		for _, p := range s.providers {
+			p.IsKilled = false
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"message": "All providers restored", "status": s.providers})
+		return
+	}
 
 	if p, ok := s.providers[pID]; ok {
 		p.IsKilled = false

@@ -198,3 +198,49 @@ func TestStatusEnquiryReportsPendingWhileTheChargeIsProcessing(t *testing.T) {
 		t.Fatalf("unknown transaction: HTTP %d, want 404", rec.Code)
 	}
 }
+
+func TestRestoreWithoutProviderRestoresEveryRail(t *testing.T) {
+	s := newTestServer()
+	for _, id := range []string{"provider-a", "provider-b"} {
+		rec := httptest.NewRecorder()
+		s.handleChaosKill(rec, httptest.NewRequest(http.MethodPost, "/api/v1/chaos/kill?provider_id="+id, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("kill %s: status %d", id, rec.Code)
+		}
+	}
+	for _, target := range []string{"/api/v1/chaos/restore", "/api/v1/chaos/restore?provider_id=all"} {
+		rec := httptest.NewRecorder()
+		s.handleChaosRestore(rec, httptest.NewRequest(http.MethodPost, target, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d", target, rec.Code)
+		}
+		for id, p := range s.providers {
+			if p.IsKilled {
+				t.Fatalf("%s: %s still killed", target, id)
+			}
+		}
+	}
+	rec := httptest.NewRecorder()
+	s.handleChaosRestore(rec, httptest.NewRequest(http.MethodPost, "/api/v1/chaos/restore?provider_id=nope", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown provider: status %d, want 404", rec.Code)
+	}
+}
+
+func TestStatusEnquiryAcceptsTxIdAlias(t *testing.T) {
+	s := newTestServer()
+	charge := post(t, s.handleCharge, ChargeRequest{TransactionID: "tx_alias", ProviderID: "provider-a", Amount: 10, PaymentMethod: "UPI", CustomerVPA: "success@gateway"})
+	if charge.Code != http.StatusOK {
+		t.Fatalf("charge: status %d", charge.Code)
+	}
+	for _, query := range []string{"transaction_id=tx_alias", "tx_id=tx_alias"} {
+		rec := httptest.NewRecorder()
+		s.handleStatusEnquiry(rec, httptest.NewRequest(http.MethodGet, "/api/v1/bank/status?"+query, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d", query, rec.Code)
+		}
+		if got := decode[ChargeResponse](t, rec); got.Status != "SUCCESS" {
+			t.Fatalf("%s: status %q, want SUCCESS", query, got.Status)
+		}
+	}
+}
