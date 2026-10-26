@@ -2,6 +2,7 @@ package com.gateway.orchestrator.repository;
 
 import com.gateway.orchestrator.domain.OrderStatus;
 import com.gateway.orchestrator.domain.Payment;
+import com.gateway.orchestrator.domain.PaymentMethod;
 import com.gateway.orchestrator.domain.PaymentStatus;
 import com.gateway.orchestrator.domain.RefundStatus;
 import jakarta.persistence.LockModeType;
@@ -56,4 +57,33 @@ public interface PaymentRepository extends JpaRepository<Payment, String> {
                                                 @Param("failed") RefundStatus failed,
                                                 @Param("failedRefundRetryBefore") Instant failedRefundRetryBefore,
                                                 Pageable pageable);
+
+    /** One group of a merchant's payments for analytics: same status, method and provider. Amounts in paise. */
+    interface PaymentSummaryRow {
+        PaymentStatus getStatus();
+
+        PaymentMethod getMethod();
+
+        String getProvider();
+
+        long getPayments();
+
+        long getAmount();
+
+        long getCapturedAmount();
+
+        long getRefundedAmount();
+
+        long getFees();
+
+        long getTaxes();
+    }
+
+    @Query("select p.status as status, p.method as method, p.provider as provider, count(p) as payments, "
+            + "coalesce(sum(p.amount), 0) as amount, "
+            + "coalesce(sum(case when p.captured = true then p.amount else 0 end), 0) as capturedAmount, "
+            + "coalesce(sum(p.amountRefunded), 0) as refundedAmount, "
+            + "coalesce(sum(p.fee), 0) as fees, coalesce(sum(p.tax), 0) as taxes "
+            + "from Payment p where p.merchantId = :merchantId group by p.status, p.method, p.provider")
+    List<PaymentSummaryRow> summarizeByMerchant(@Param("merchantId") String merchantId);
 }

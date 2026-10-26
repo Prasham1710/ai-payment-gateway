@@ -14,13 +14,6 @@ spring:
     hibernate:
       ddl-auto: update
     show-sql: false
-    properties:
-      hibernate:
-        dialect: org.hibernate.dialect.PostgreSQLDialect
-  data:
-    redis:
-      host: localhost
-      port: 6380
   task:
     scheduling:
       pool:
@@ -44,6 +37,8 @@ gateway:
     providers: provider-a,provider-b,provider-c
     connect-timeout: 2s
     read-timeout: 8s
+    # Per-rail circuit breakers (resilience4j instances below): a failing rail is skipped until it recovers.
+    circuit-breaker-enabled: ${GATEWAY_CIRCUIT_BREAKER_ENABLED:true}
     ai:
       # AI smart routing (services/ai-router). If it is down or slow, the order above is used.
       enabled: ${GATEWAY_AI_ROUTING_ENABLED:true}
@@ -76,6 +71,9 @@ gateway:
     base-backoff: 5s
     max-backoff: 1h
     timeout: 5s
+  cors:
+    # Browser origins allowed to call /v1 and /ops: the operations dashboard (services/frontend).
+    allowed-origins: ${GATEWAY_CORS_ALLOWED_ORIGINS:http://localhost:3000,http://127.0.0.1:3000}
   refunds:
     poll-interval-ms: 5000
     max-attempts: 10

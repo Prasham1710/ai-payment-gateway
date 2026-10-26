@@ -18,6 +18,7 @@ public class GatewayProperties {
     private Reconciliation reconciliation = new Reconciliation();
     private Webhooks webhooks = new Webhooks();
     private Refunds refunds = new Refunds();
+    private Cors cors = new Cors();
 
     @Data
     public static class Security {
@@ -32,6 +33,11 @@ public class GatewayProperties {
         private Duration connectTimeout = Duration.ofSeconds(2);
         private Duration readTimeout = Duration.ofSeconds(8);
         private Ai ai = new Ai();
+        /**
+         * Per-rail circuit breakers (resilience4j instances named after each provider). When a rail keeps
+         * failing, its breaker opens and the rail is skipped without sending the charge, until it recovers.
+         */
+        private boolean circuitBreakerEnabled = true;
     }
 
     @Data
@@ -95,5 +101,11 @@ public class GatewayProperties {
         /** Retry interval once attempts are exhausted but the bank may have processed the refund. */
         private Duration unconfirmedRetryInterval = Duration.ofHours(1);
         private int batchSize = 50;
+    }
+
+    @Data
+    public static class Cors {
+        /** Browser origins allowed to call the API (the operations dashboard). Empty disables CORS. */
+        private List<String> allowedOrigins = List.of("http://localhost:3000", "http://127.0.0.1:3000");
     }
 }

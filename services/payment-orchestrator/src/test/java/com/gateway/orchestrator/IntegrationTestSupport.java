@@ -14,6 +14,8 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
 import com.gateway.orchestrator.service.WebhookDispatcher;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 
 import java.io.IOException;
 import java.time.Duration;
@@ -55,10 +57,14 @@ abstract class IntegrationTestSupport {
     private JdbcTemplate jdbcTemplate;
     @Autowired
     private WebhookDispatcher dispatcher;
+    @Autowired
+    private CircuitBreakerRegistry circuitBreakers;
 
     @BeforeEach
     void resetBank() throws InterruptedException {
         BANK.reset();
+        // Rail health is shared state: a rail taken down by one test must not stay "open" for the next.
+        circuitBreakers.getAllCircuitBreakers().forEach(CircuitBreaker::reset);
         // Every test starts with an idle dispatcher and an empty webhook outbox, so sends left over
         // from earlier tests cannot claim this test's deliveries.
         assertThat(dispatcher.awaitIdle(Duration.ofSeconds(10))).isTrue();
