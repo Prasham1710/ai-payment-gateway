@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  orchestrator:
+    name: Payment orchestrator (Java)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/payment-orchestrator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: Build and test
+        run: ./mvnw -B -ntp verify
+
+  bank-simulator:
+    name: Bank simulator (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/bank-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/bank-simulator/go.mod
+          cache: false
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: Vet
+        run: go vet ./...
+      - name: Test (race detector)
+        run: go test -race -count=1 ./...
+
+  ai-router:
+    name: AI router (Python)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/ai-router
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: services/ai-router/requirements.txt
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Test
+        run: python -m pytest -q
+
+  dashboard:
+    name: Operations dashboard (Next.js)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: services/frontend/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Type check
+        run: npm run typecheck
+      - name: Build
+        run: npm run build

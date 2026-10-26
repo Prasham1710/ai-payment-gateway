@@ -6,11 +6,31 @@ target/
 services/bank-simulator/bank-simulator
 services/bank-simulator/*.exe
 
+# Node.js / Next.js (services/frontend)
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+npm-debug.log*
+.eslintcache
+coverage/
+
+# Python (services/ai-router)
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local env files and secrets
+.env
+.env*.local
+*.pem
+
 # IDE / OS
 .idea/
 *.iml
 .vscode/
 .DS_Store
-
-# Local env files
-.env
+Thumbs.db
+*.swp
