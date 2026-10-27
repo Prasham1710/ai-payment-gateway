@@ -77,14 +77,21 @@ class FeedbackRequest(BaseModel):
 
 def create_app(model_path: str | None = None, discount: float | None = None, half_life: float | None = None,
                model_weight: float | None = None, timezone: str | None = None, seed: int | None = None,
-               cors_origins: list[str] | None = None) -> FastAPI:
+               cors_origins: list[str] | None = None, explore_rate: float | None = None) -> FastAPI:
+    # Defaults chosen by simulation against the bank simulator's rails (declines are final, so the first rail
+    # decides the outcome): ranking by the posterior mean with 3% Thompson-sampling exploration matches the
+    # static order while every rail is healthy and still moves traffic off a rail that degrades.
     model_path = model_path if model_path is not None else os.getenv("AI_ROUTER_MODEL_PATH", "models/routing-model.joblib")
-    discount = discount if discount is not None else float(os.getenv("AI_ROUTER_DISCOUNT", "0.98"))
-    half_life = half_life if half_life is not None else float(os.getenv("AI_ROUTER_HALF_LIFE_SECONDS", "120"))
+    discount = discount if discount is not None else float(os.getenv("AI_ROUTER_DISCOUNT", "0.995"))
+    half_life = half_life if half_life is not None else float(os.getenv("AI_ROUTER_HALF_LIFE_SECONDS", "3600"))
+    explore_rate = explore_rate if explore_rate is not None else float(os.getenv("AI_ROUTER_EXPLORE_RATE", "0.03"))
+    if not 0 <= explore_rate <= 1:
+        raise ValueError("explore_rate must be between 0 and 1")
     model_weight = model_weight if model_weight is not None else float(os.getenv("AI_ROUTER_MODEL_WEIGHT", "0.3"))
     zone = ZoneInfo(timezone or os.getenv("AI_ROUTER_TIMEZONE", "Asia/Kolkata"))
 
     bandit = DiscountedThompsonBandit(discount=discount, half_life=half_life, rng=random.Random(seed))
+    explore_rng = random.Random(None if seed is None else seed + 1)
     model = SuccessModel(model_path)
     if cors_origins is None:
         cors_origins = [o.strip() for o in os.getenv("AI_ROUTER_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
@@ -107,17 +114,20 @@ def create_app(model_path: str | None = None, discount: float | None = None, hal
         hour = req.hour if req.hour is not None else datetime.now(zone).hour
         scores: dict[str, float] = {}
         expected: dict[str, float] = {}
-        strategy = "thompson_sampling"
+        # Mostly exploit (rank by the posterior mean); on a small share of payments explore by Thompson
+        # sampling, so a rail that was avoided gets tried again and can win its traffic back.
+        explore = explore_rng.random() < explore_rate
+        strategy = "thompson_sampling" if explore else "greedy"
         for provider in req.providers:
-            sampled = bandit.sample(provider, req.payment_method)
             recent = bandit.mean(provider, req.payment_method)
+            sampled = bandit.sample(provider, req.payment_method) if explore else recent
             predicted = model.predict(provider, req.payment_method, req.amount, hour)
             if predicted is None:
                 scores[provider] = sampled
                 expected[provider] = recent
             else:
                 # The model knows the usual pattern; the bandit reacts to what is happening right now.
-                strategy = "thompson_sampling+model"
+                strategy = ("thompson_sampling" if explore else "greedy") + "+model"
                 scores[provider] = model_weight * predicted + (1 - model_weight) * sampled
                 expected[provider] = model_weight * predicted + (1 - model_weight) * recent
         ordered = sorted(req.providers, key=lambda p: scores[p], reverse=True)
@@ -127,8 +137,12 @@ def create_app(model_path: str | None = None, discount: float | None = None, hal
 
     @app.post("/v1/feedback")
     def feedback(req: FeedbackRequest) -> dict:
+        if req.outcome == "unknown":
+            # Not resolved yet (timeout or no usable answer): the charge may still succeed, so it is not
+            # evidence about the rail either way.
+            return {"ok": True, "counted": False}
         bandit.update(req.provider, req.payment_method, req.outcome == "success")
-        return {"ok": True}
+        return {"ok": True, "counted": True}
 
     @app.get("/v1/stats")
     def stats() -> dict:

@@ -74,6 +74,12 @@ func TestKilledProviderReturns503EvenForTestInstruments(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("HTTP %d, want 503", rec.Code)
 	}
+	// The rail never processed it, so an enquiry must not report a (decline-looking) FAILED result.
+	enquiry := httptest.NewRecorder()
+	s.handleStatusEnquiry(enquiry, httptest.NewRequest(http.MethodGet, "/api/v1/bank/status?transaction_id=tx_k", nil))
+	if enquiry.Code != http.StatusNotFound {
+		t.Fatalf("enquiry after kill switch: HTTP %d, want 404", enquiry.Code)
+	}
 }
 
 func TestRefundIsIdempotentPerRefundID(t *testing.T) {

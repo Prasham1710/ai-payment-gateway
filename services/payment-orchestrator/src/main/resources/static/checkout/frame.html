@@ -384,10 +384,15 @@
     state.busy = true;
     $("pay").disabled = true;
     show("view-processing");
+    // One key per payment attempt, kept until the gateway gives a definite answer: a retry after a lost
+    // response or a "still processing" reply replays the same attempt instead of creating a second payment.
+    if (!state.attemptKey) {
+      state.attemptKey = newIdempotencyKey();
+    }
 
     fetch("/v1/checkout/payments", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Idempotency-Key": newIdempotencyKey() },
+      headers: { "Content-Type": "application/json", "Idempotency-Key": state.attemptKey },
       body: JSON.stringify(body)
     })
       .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, status: res.status, data: data }; }); })
@@ -395,6 +400,7 @@
         state.busy = false;
         $("pay").disabled = false;
         if (result.ok) {
+          state.attemptKey = null;
           state.done = true;
           var payment = result.data;
           showResult(true, "Payment successful", "Redirecting you back to the merchant…", payment.payment_id, false);
@@ -411,11 +417,13 @@
         }
         // Input mistakes are shown on the form; real payment failures get the failure screen and an event.
         if (error.reason === "input_validation_failed") {
+          state.attemptKey = null;
           show("view-form");
           $("form-error").textContent = error.description;
           $("form-error").hidden = false;
           return;
         }
+        state.attemptKey = null;   // a definite failure: the next attempt (e.g. another card) is a new payment
         post("payment.failed", { error: error });
         var paymentId = error.metadata && error.metadata.payment_id;
         showResult(false, "Payment failed", error.description, paymentId || "", true);

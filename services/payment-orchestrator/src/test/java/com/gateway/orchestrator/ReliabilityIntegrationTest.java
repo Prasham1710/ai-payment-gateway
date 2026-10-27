@@ -95,6 +95,25 @@ class ReliabilityIntegrationTest extends IntegrationTestSupport {
     }
 
     @Test
+    void responseThatBreaksOffMidBodyIsUnknownAndNeverFailsOverToAnotherRail() {
+        Keys keys = signup();
+        BANK.setMode("provider-a", Mode.TRUNCATED);   // provider-a approves, then the response is cut short
+        String orderId = createOrder(keys, Map.of("amount", 15100)).get("id").asText();
+
+        ResponseEntity<JsonNode> paid = pay(keys, orderId, Map.of("method", "upi", "vpa", "ravi@okaxis"));
+
+        // Charging provider-b now would debit the customer twice. Instead the gateway treats the outcome as
+        // unknown, asks provider-a, learns the charge was approved and completes the payment there.
+        assertThat(BANK.chargeCalls("provider-b")).isZero();
+        assertThat(paid.getStatusCode()).isEqualTo(HttpStatus.OK);
+        String paymentId = paid.getBody().get("payment_id").asText();
+        JsonNode payment = payment(keys, paymentId);
+        assertThat(payment.get("status").asText()).isEqualTo("captured");
+        assertThat(payment.get("provider").asText()).isEqualTo("provider-a");
+        assertThat(payment.get("attempts").asInt()).isEqualTo(1);
+    }
+
+    @Test
     void lateAuthorizationOnAnAlreadyPaidOrderIsRefundedAutomatically() {
         Keys keys = signup();
         BANK.setMode("provider-a", Mode.GATEWAY_ERROR);

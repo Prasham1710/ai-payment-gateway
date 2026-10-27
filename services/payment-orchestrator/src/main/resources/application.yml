@@ -24,6 +24,8 @@ spring:
     property-naming-strategy: SNAKE_CASE
     deserialization:
       accept-float-as-int: false
+      # Reject unknown fields, so a typo such as "amout" in a refund request is an error, not a full refund.
+      fail-on-unknown-properties: true
 
 simulator:
   base-url: http://localhost:8081
@@ -82,20 +84,19 @@ gateway:
 
 resilience4j:
   circuitbreaker:
-    instances:
-      provider-a:
+    configs:
+      # One breaker per provider rail (PaymentOrchestratorService): opens when at least half of the last
+      # 10 calls failed (after 5 calls), waits 5 s, then lets 3 trial calls through.
+      default:
         slidingWindowSize: 10
         minimumNumberOfCalls: 5
         failureRateThreshold: 50
         waitDurationInOpenState: 5000ms
         permittedNumberOfCallsInHalfOpenState: 3
+    instances:
+      provider-a:
+        baseConfig: default
       provider-b:
-        slidingWindowSize: 10
-        minimumNumberOfCalls: 5
-        failureRateThreshold: 50
-        waitDurationInOpenState: 5000ms
+        baseConfig: default
       provider-c:
-        slidingWindowSize: 10
-        minimumNumberOfCalls: 5
-        failureRateThreshold: 50
-        waitDurationInOpenState: 5000ms
+        baseConfig: default

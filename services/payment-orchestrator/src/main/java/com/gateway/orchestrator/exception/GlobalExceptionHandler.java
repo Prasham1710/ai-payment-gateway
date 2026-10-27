@@ -6,6 +6,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ResponseEntity;
+import com.fasterxml.jackson.databind.exc.UnrecognizedPropertyException;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -22,6 +23,10 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<ErrorResponse> handleUnreadable(HttpMessageNotReadableException e) {
+        if (e.getCause() instanceof UnrecognizedPropertyException unknown) {
+            return handleGateway(GatewayException.badRequest(unknown.getPropertyName() + " is not a valid field for this request.",
+                    unknown.getPropertyName()));
+        }
         return handleGateway(GatewayException.badRequest("The request body is not valid JSON or has a field of the wrong type."));
     }
 

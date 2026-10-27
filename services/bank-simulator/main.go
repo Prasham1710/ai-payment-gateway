@@ -156,7 +156,8 @@ func (s *SimulatorServer) handleCharge(w http.ResponseWriter, r *http.Request) {
 			LatencyMs:     10,
 			Timestamp:     time.Now().Format(time.RFC3339),
 		}
-		s.recordTx(req.TransactionID, resp)
+		// Not recorded: the rail never processed the charge, so a status enquiry must answer 404
+		// ("never received"), not a FAILED result that would read as a bank decline.
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(resp)

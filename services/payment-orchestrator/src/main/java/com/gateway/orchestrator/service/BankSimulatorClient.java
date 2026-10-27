@@ -12,13 +12,14 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
 import java.net.ConnectException;
 import java.net.NoRouteToHostException;
+import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
+import java.net.http.HttpConnectTimeoutException;
 import java.util.Locale;
 import java.util.Set;
 import java.util.function.Supplier;
@@ -66,19 +67,14 @@ public class BankSimulatorClient {
         ResponseEntity<String> response;
         try {
             response = request.get();
-        } catch (ResourceAccessException e) {
-            // Only a failure to connect proves the bank never saw the request; a read timeout or a
-            // reset connection leaves the outcome unknown.
-            Throwable cause = e.getCause();
-            boolean notSent = cause instanceof ConnectException || cause instanceof UnknownHostException
-                    || cause instanceof NoRouteToHostException;
+        } catch (RestClientException e) {
+            // Only a failure to connect proves the bank never saw the request. Anything else (read
+            // timeout, reset connection, a body that broke off while being read) may come after the
+            // bank processed it, so the outcome is unknown and the charge must not go to another rail.
+            boolean notSent = provablyNotSent(e);
             log.warn("Bank call failed ({}): {}", notSent ? "not sent" : "outcome unknown", e.getMessage());
             return new BankResult(notSent ? BankResult.Outcome.UNAVAILABLE : BankResult.Outcome.UNKNOWN,
                     null, elapsedMs(start), e.getMessage());
-        } catch (RestClientException e) {
-            // Raised while preparing the request, before anything was sent.
-            log.warn("Bank request could not be sent: {}", e.getMessage());
-            return new BankResult(BankResult.Outcome.UNAVAILABLE, null, elapsedMs(start), e.getMessage());
         }
 
         int latency = elapsedMs(start);
@@ -112,6 +108,21 @@ public class BankSimulatorClient {
         return APPROVED.contains(bankStatus)
                 ? new BankResult(BankResult.Outcome.SUCCESS, body, latency, null)
                 : new BankResult(BankResult.Outcome.DECLINED, body, latency, body.getMessage());
+    }
+
+    /** True only when the cause chain shows the connection was never established. */
+    static boolean provablyNotSent(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof ConnectException || cause instanceof UnknownHostException
+                    || cause instanceof NoRouteToHostException || cause instanceof HttpConnectTimeoutException) {
+                return true;
+            }
+            if (cause instanceof SocketTimeoutException && cause.getMessage() != null
+                    && cause.getMessage().toLowerCase(Locale.ROOT).contains("connect timed out")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private BankResponse parse(String raw) {

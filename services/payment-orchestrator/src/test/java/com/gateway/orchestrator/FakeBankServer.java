@@ -31,7 +31,9 @@ public class FakeBankServer implements AutoCloseable {
         /** The bank approves the charge but answers 502; the approval only shows up in status enquiries after {@link #settlePendingCharges()}. */
         GATEWAY_ERROR,
         /** The bank approves the charge but answers after {@link #SLOW_MILLIS}, longer than the gateway's read timeout. */
-        SLOW
+        SLOW,
+        /** The bank approves the charge, starts a 200 response and the connection breaks off mid-body. */
+        TRUNCATED
     }
 
     public enum RefundMode { PROCESS, DOWN, GATEWAY_ERROR }
@@ -164,6 +166,15 @@ public class FakeBankServer implements AutoCloseable {
                 sleep(SLOW_MILLIS);
                 charges.put(txId, approved);
                 respond(exchange, 200, approved);
+            }
+            case TRUNCATED -> {
+                charges.put(txId, approved);
+                byte[] bytes = MAPPER.writeValueAsBytes(approved);
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.sendResponseHeaders(200, bytes.length);
+                exchange.getResponseBody().write(bytes, 0, bytes.length / 2);
+                exchange.getResponseBody().flush();
+                exchange.close();
             }
         }
     }

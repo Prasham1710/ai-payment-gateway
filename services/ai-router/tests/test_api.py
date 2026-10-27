@@ -18,7 +18,7 @@ def test_route_returns_every_candidate_once():
     c = client()
     body = c.post("/v1/route", json={"providers": PROVIDERS + ["provider-a"], "payment_method": "upi", "amount": 50000}).json()
     assert sorted(body["providers"]) == PROVIDERS
-    assert body["strategy"] == "thompson_sampling"
+    assert body["strategy"] in ("greedy", "thompson_sampling")
     assert body["model_version"] is None
 
 
@@ -61,7 +61,7 @@ def test_trained_model_is_blended_in_and_can_be_reloaded(tmp_path):
     assert c.post("/v1/model/reload").json()["loaded"] is True
 
     body = c.post("/v1/route", json={"providers": PROVIDERS, "payment_method": "UPI", "amount": 50000, "hour": 10}).json()
-    assert body["strategy"] == "thompson_sampling+model"
+    assert body["strategy"] in ("greedy+model", "thompson_sampling+model")
     assert body["providers"][0] == "provider-b"
     assert body["expected_success"]["provider-b"] > 0.9
     assert c.get("/health").json()["model_version"] == body["model_version"]
@@ -74,3 +74,23 @@ def test_dashboard_origin_is_allowed_and_others_are_not(tmp_path):
     assert allowed.headers["access-control-allow-origin"] == "http://localhost:3000"
     denied = client.options("/v1/stats", headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "GET"})
     assert "access-control-allow-origin" not in denied.headers
+
+
+def test_routing_mostly_exploits_and_explores_at_the_configured_rate():
+    c = client(explore_rate=0.1)
+    for _ in range(40):
+        c.post("/v1/feedback", json={"provider": "provider-a", "payment_method": "UPI", "outcome": "success"})
+        c.post("/v1/feedback", json={"provider": "provider-b", "payment_method": "UPI", "outcome": "declined"})
+    bodies = [c.post("/v1/route", json={"providers": PROVIDERS, "payment_method": "UPI", "amount": 1000}).json() for _ in range(400)]
+    explored = [b for b in bodies if b["strategy"] == "thompson_sampling"]
+    assert 20 <= len(explored) <= 65   # about 10%
+    # Every exploiting decision puts the best-known rail first.
+    assert all(b["providers"][0] == "provider-a" for b in bodies if b["strategy"] == "greedy")
+
+
+def test_unresolved_outcomes_are_not_counted():
+    c = client()
+    for _ in range(10):
+        assert c.post("/v1/feedback", json={"provider": "provider-c", "payment_method": "UPI", "outcome": "unknown"}).json() == {"ok": True, "counted": False}
+    arms = c.get("/v1/stats").json()["arms"]
+    assert all(a["provider"] != "provider-c" for a in arms)

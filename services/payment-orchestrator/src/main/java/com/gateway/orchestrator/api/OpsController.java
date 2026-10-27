@@ -12,9 +12,10 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 /**
- * Operator endpoints for the operations dashboard: provider rail circuit breakers.
+ * Operator endpoints for the operations dashboard: health and provider rail circuit breakers.
  *
  * <p>Not part of the merchant API and not authenticated, like the bank simulator's chaos controls:
  * expose them only on a trusted network.
@@ -26,6 +27,12 @@ public class OpsController {
 
     private final CircuitBreakerRegistry circuitBreakers;
     private final GatewayProperties properties;
+
+    /** Liveness for the dashboard's status indicator (CORS-enabled, unlike the static pages). */
+    @GetMapping("/health")
+    public ResponseEntity<Map<String, String>> health() {
+        return ResponseEntity.ok(Map.of("status", "ok"));
+    }
 
     @GetMapping("/circuit-breakers")
     public ResponseEntity<CollectionResponse<CircuitBreakerResponse>> circuitBreakers() {

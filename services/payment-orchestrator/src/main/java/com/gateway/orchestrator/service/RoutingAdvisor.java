@@ -12,6 +12,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -36,6 +37,7 @@ public class RoutingAdvisor {
 
     public static final String STATIC = "static";
     private static final long WARNING_INTERVAL_MS = 60_000;
+    private static final Duration FEEDBACK_TIMEOUT = Duration.ofSeconds(2);
 
     private final GatewayProperties.Routing routing;
     private final ObjectMapper objectMapper;
@@ -49,6 +51,9 @@ public class RoutingAdvisor {
         this.routing = properties.getRouting();
         this.objectMapper = objectMapper;
         this.httpClient = HttpClient.newBuilder()
+                // Plain HTTP/1.1: the router is a cleartext uvicorn service, and the JDK's default HTTP/2
+                // upgrade attempt only makes it log a warning on every request.
+                .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(routing.getAi().getTimeout())
                 .followRedirects(HttpClient.Redirect.NEVER)
                 .build();
@@ -65,7 +70,8 @@ public class RoutingAdvisor {
             body.put("payment_method", payment.getMethod().name());
             body.put("amount", payment.getAmount());
             body.put("currency", payment.getCurrency());
-            CompletableFuture<HttpResponse<String>> call = httpClient.sendAsync(post("/v1/route", body), HttpResponse.BodyHandlers.ofString());
+            CompletableFuture<HttpResponse<String>> call = httpClient.sendAsync(post("/v1/route", body, routing.getAi().getTimeout()),
+                    HttpResponse.BodyHandlers.ofString());
             HttpResponse<String> response;
             try {
                 response = call.get(routing.getAi().getTimeout().toMillis(), TimeUnit.MILLISECONDS);
@@ -97,9 +103,16 @@ public class RoutingAdvisor {
         }
     }
 
-    /** Reports one attempt to the router without waiting for it; failures are ignored. */
+    /**
+     * Reports one attempt to the router without waiting for it; failures are ignored. Approvals and
+     * declines of sandbox test instruments are not reported: the bank forces their outcome on whichever
+     * rail they reach, so they say nothing about the rail.
+     */
     public void feedback(String provider, Payment payment, AttemptStatus status, Integer latencyMs) {
         if (!routing.getAi().isEnabled()) {
+            return;
+        }
+        if ((status == AttemptStatus.SUCCESS || status == AttemptStatus.DECLINED) && isSandboxInstrument(payment)) {
             return;
         }
         try {
@@ -111,17 +124,24 @@ public class RoutingAdvisor {
             if (latencyMs != null) {
                 body.put("latency_ms", latencyMs);
             }
-            httpClient.sendAsync(post("/v1/feedback", body), HttpResponse.BodyHandlers.discarding())
-                    .orTimeout(routing.getAi().getTimeout().toMillis() * 10, TimeUnit.MILLISECONDS)
+            // Off the payment path, so it can wait longer than routing advice does.
+            httpClient.sendAsync(post("/v1/feedback", body, FEEDBACK_TIMEOUT), HttpResponse.BodyHandlers.discarding())
                     .exceptionally(e -> null);
         } catch (Exception e) {
             log.debug("Could not send routing feedback: {}", e.getMessage());
         }
     }
 
-    private HttpRequest post(String path, Map<String, Object> body) throws Exception {
+    /** Test instruments whose outcome the bank simulator forces (see services/bank-simulator, forcedOutcome). */
+    static boolean isSandboxInstrument(Payment payment) {
+        String vpa = payment.getVpa() == null ? "" : payment.getVpa().toLowerCase(Locale.ROOT);
+        return vpa.equals("success@gateway") || vpa.equals("failure@gateway")
+                || "1111".equals(payment.getCardLast4()) || "0002".equals(payment.getCardLast4());
+    }
+
+    private HttpRequest post(String path, Map<String, Object> body, Duration timeout) throws Exception {
         return HttpRequest.newBuilder(URI.create(routing.getAi().getBaseUrl() + path))
-                .timeout(routing.getAi().getTimeout())
+                .timeout(timeout)
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
                 .build();

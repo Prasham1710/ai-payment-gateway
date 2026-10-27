@@ -49,6 +49,7 @@ class OperationsIntegrationTest extends IntegrationTestSupport {
 
         assertThat(http.postForEntity("/ops/circuit-breakers/provider-x/reset", null, JsonNode.class).getStatusCode())
                 .isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(http.getForObject("/ops/health", JsonNode.class).get("status").asText()).isEqualTo("ok");
     }
 
     @Test
@@ -95,6 +96,18 @@ class OperationsIntegrationTest extends IntegrationTestSupport {
         assertThat(analytics.get("count_by_status").get("failed").asLong()).isEqualTo(1);
 
         assertThat(http.getForEntity("/v1/analytics", JsonNode.class).getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
+    @Test
+    void aMisspelledRefundFieldIsRejectedInsteadOfRefundingEverything() {
+        Keys keys = signup();
+        String paymentId = capturedPayment(keys, 50000);
+
+        ResponseEntity<JsonNode> typo = as(keys).postForEntity("/v1/payments/" + paymentId + "/refund", Map.of("amout", 100), JsonNode.class);
+
+        assertThat(typo.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(typo.getBody().at("/error/field").asText()).isEqualTo("amout");
+        assertThat(payment(keys, paymentId).get("amount_refunded").asLong()).isZero();
     }
 
     @Test
